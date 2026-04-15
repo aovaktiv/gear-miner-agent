@@ -78,6 +78,7 @@ The UI starts on `http://127.0.0.1:8765` by default and gives you:
 - an output choice of `CSV` or `Excel`
 - export files with only `Brand` and `Product Name`
 - recent run history with download links for the export file and snapshot JSON
+- a reset control that kills the newest active job or clears the newest completed run for a fresh search
 
 UI-managed exports and snapshots are saved under `data/ui/`.
 
