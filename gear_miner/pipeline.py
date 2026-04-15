@@ -28,6 +28,11 @@ DEFAULT_HEADERS = {
 
 
 FetchHtml = Callable[[str], str]
+ShouldCancel = Callable[[], bool]
+
+
+class MiningCancelled(Exception):
+    pass
 
 
 def default_fetch_html(url: str, timeout_seconds: int = 15) -> str:
@@ -45,12 +50,14 @@ class GearMinerAgent:
         capture_index: Optional[WaybackCaptureIndex] = None,
         default_start_year: int = 2020,
         default_end_year: Optional[int] = None,
+        should_cancel: Optional[ShouldCancel] = None,
     ) -> None:
         self.fetch_html = fetch_html or default_fetch_html
         self.extractor = extractor or JsonLdProductExtractor()
         self.capture_index = capture_index or WaybackCaptureIndex()
         self.default_start_year = default_start_year
         self.default_end_year = default_end_year or datetime.now(timezone.utc).year
+        self.should_cancel = should_cancel or (lambda: False)
 
     def mine_category(
         self,
@@ -88,6 +95,7 @@ class GearMinerAgent:
         outcomes: List[CrawlOutcome] = []
 
         for seed in seeds:
+            self._raise_if_cancelled()
             extracted_count = 0
             successful_captures = 0
             errors: List[str] = []
@@ -102,6 +110,7 @@ class GearMinerAgent:
                 errors.append(f"archive lookup failed: {exc}")
 
             for capture in captures:
+                self._raise_if_cancelled()
                 try:
                     html = self.fetch_html(capture.archived_url)
                     extracted = self.extractor.extract(html, seed)
@@ -116,6 +125,7 @@ class GearMinerAgent:
                     products.extend(extracted)
                     extracted_count += len(extracted)
                     successful_captures += 1
+                    self._raise_if_cancelled()
                 except Exception as exc:
                     errors.append(f"{capture.archived_url}: {exc}")
 
@@ -139,6 +149,7 @@ class GearMinerAgent:
                     )
                 )
 
+        self._raise_if_cancelled()
         report = MineReport(
             category=category,
             started_at=started_at,
@@ -154,6 +165,10 @@ class GearMinerAgent:
             write_snapshot(output_path, report)
 
         return report
+
+    def _raise_if_cancelled(self) -> None:
+        if self.should_cancel():
+            raise MiningCancelled()
 
 
 def brands_match(candidate_brand: str, requested_brand: str) -> bool:

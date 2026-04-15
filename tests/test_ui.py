@@ -1,5 +1,6 @@
 from pathlib import Path
 import tempfile
+import threading
 import time
 import unittest
 
@@ -58,16 +59,70 @@ class GearMinerUiTest(unittest.TestCase):
         self.assertIn("Step 2: Product category", page)
         self.assertIn("Run Gear Miner", page)
         self.assertIn("2020 to present", page)
+        self.assertIn("Kill Last Job", page)
+        self.assertIn("Clear for New Search", page)
+
+    def test_reset_latest_run_clears_completed_run(self) -> None:
+        html = FIXTURE.read_text(encoding="utf-8")
+
+        def fetch_html(_: str) -> str:
+            return html
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            manager = RunManager(
+                data_dir=Path(tmp_dir),
+                agent_factory=lambda: GearMinerAgent(
+                    fetch_html=fetch_html,
+                    capture_index=FakeCaptureIndex(),
+                ),
+            )
+            run = manager.submit_run("Brooks", "Running shoes", "csv")
+            self._wait_for_run(manager, run.run_id)
+
+            result = manager.reset_latest_run()
+
+            self.assertEqual(result["action"], "cleared")
+            self.assertEqual(result["run"]["run_id"], run.run_id)
+            self.assertEqual(manager.list_runs(), [])
+
+    def test_reset_latest_run_requests_cancellation_for_active_run(self) -> None:
+        html = FIXTURE.read_text(encoding="utf-8")
+        release_fetch = threading.Event()
+
+        def fetch_html(_: str) -> str:
+            release_fetch.wait(timeout=1)
+            return html
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            manager = RunManager(
+                data_dir=Path(tmp_dir),
+                agent_factory=lambda: GearMinerAgent(
+                    fetch_html=fetch_html,
+                    capture_index=FakeCaptureIndex(),
+                ),
+            )
+            run = manager.submit_run("Brooks", "Running shoes", "csv")
+            self._wait_for_status(manager, run.run_id, {RunStatus.RUNNING.value})
+
+            result = manager.reset_latest_run()
+            self.assertEqual(result["action"], "cancel_requested")
+
+            release_fetch.set()
+            final_run = self._wait_for_status(manager, run.run_id, {RunStatus.CANCELLED.value})
+            self.assertEqual(final_run["error"], "Run cancelled by user.")
 
     def _wait_for_run(self, manager: RunManager, run_id: str) -> dict:
+        return self._wait_for_status(manager, run_id, {RunStatus.SUCCEEDED.value, RunStatus.FAILED.value})
+
+    def _wait_for_status(self, manager: RunManager, run_id: str, statuses: set[str]) -> dict:
         deadline = time.time() + 5
         while time.time() < deadline:
             runs = {run["run_id"]: run for run in manager.list_runs()}
             run = runs[run_id]
-            if run["status"] in {RunStatus.SUCCEEDED.value, RunStatus.FAILED.value}:
+            if run["status"] in statuses:
                 return run
             time.sleep(0.05)
-        self.fail(f"Run {run_id} did not finish before timeout.")
+        self.fail(f"Run {run_id} did not reach statuses {statuses} before timeout.")
 
 
 if __name__ == "__main__":

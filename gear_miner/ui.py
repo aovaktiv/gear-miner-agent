@@ -14,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .exporters import write_products_export
 from .models import ExportFormat, GearCategory, slugify
-from .pipeline import GearMinerAgent
+from .pipeline import GearMinerAgent, MiningCancelled
 
 
 def utc_now() -> datetime:
@@ -30,6 +30,11 @@ class RunStatus(str, Enum):
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class RunCancelled(Exception):
+    pass
 
 
 @dataclass
@@ -83,6 +88,7 @@ class RunManager:
         self.agent_factory = agent_factory or GearMinerAgent
         self._lock = threading.Lock()
         self._runs: Dict[str, ManagedRun] = {}
+        self._cancel_events: Dict[str, threading.Event] = {}
         self._load()
 
     def submit_run(self, brand: str, category_input: str, export_format_input: str) -> ManagedRun:
@@ -104,6 +110,7 @@ class RunManager:
 
         with self._lock:
             self._runs[run.run_id] = run
+            self._cancel_events[run.run_id] = threading.Event()
             self._save_locked()
 
         thread = threading.Thread(target=self._execute_run, args=(run.run_id,), daemon=True)
@@ -114,6 +121,29 @@ class RunManager:
         with self._lock:
             runs = [run.to_dict() for run in self._runs.values()]
         return sorted(runs, key=lambda run: run["created_at"], reverse=True)
+
+    def reset_latest_run(self) -> Dict[str, Any]:
+        with self._lock:
+            latest_run = self._latest_run_locked()
+            if latest_run is None:
+                raise ValueError("There is no run to reset.")
+
+            if latest_run.status in {RunStatus.QUEUED.value, RunStatus.RUNNING.value}:
+                cancel_event = self._cancel_events.setdefault(latest_run.run_id, threading.Event())
+                cancel_event.set()
+                self._save_locked()
+                return {
+                    "action": "cancel_requested",
+                    "run": latest_run.to_dict(),
+                }
+
+            removed = self._runs.pop(latest_run.run_id)
+            self._cancel_events.pop(latest_run.run_id, None)
+            self._save_locked()
+            return {
+                "action": "cleared",
+                "run": removed.to_dict(),
+            }
 
     def resolve_artifact(self, run_id: str, artifact: str) -> tuple[Path, str, str]:
         with self._lock:
@@ -142,6 +172,7 @@ class RunManager:
             self._save_locked()
 
         try:
+            self._raise_if_cancelled(run_id)
             category = GearCategory(run.category)
             export_format = ExportFormat.parse(run.export_format)
             base_name = self._build_base_name(run.run_id, run.brand, category)
@@ -149,12 +180,16 @@ class RunManager:
             export_path = self.exports_dir / f"{base_name}.{export_format.extension}"
 
             agent = self.agent_factory()
+            if hasattr(agent, "should_cancel"):
+                agent.should_cancel = lambda run_id=run_id: self._cancel_events.get(run_id, threading.Event()).is_set()
             report = agent.mine_category(
                 category=category,
                 brand=run.brand,
                 output_path=snapshot_path,
             )
+            self._raise_if_cancelled(run_id)
             write_products_export(export_path, report.products, export_format)
+            self._raise_if_cancelled(run_id)
 
             payload = report.to_dict()
             with self._lock:
@@ -176,6 +211,15 @@ class RunManager:
                     for product in payload["products"][:10]
                 ]
                 self._save_locked()
+        except (RunCancelled, MiningCancelled):
+            with self._lock:
+                run = self._runs.get(run_id)
+                if run is None:
+                    return
+                run.status = RunStatus.CANCELLED.value
+                run.finished_at = utc_now_iso()
+                run.error = "Run cancelled by user."
+                self._save_locked()
         except Exception as exc:
             with self._lock:
                 run = self._runs[run_id]
@@ -187,6 +231,16 @@ class RunManager:
     def _build_base_name(self, run_id: str, brand: str, category: GearCategory) -> str:
         timestamp = utc_now().strftime("%Y%m%d-%H%M%S")
         return f"{slugify(brand)}-{slugify(category.display_name)}-{timestamp}-{run_id}"
+
+    def _raise_if_cancelled(self, run_id: str) -> None:
+        cancel_event = self._cancel_events.get(run_id)
+        if cancel_event is not None and cancel_event.is_set():
+            raise RunCancelled()
+
+    def _latest_run_locked(self) -> Optional[ManagedRun]:
+        if not self._runs:
+            return None
+        return max(self._runs.values(), key=lambda run: run.created_at)
 
     def _load(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -216,6 +270,7 @@ class RunManager:
                 error=item.get("error"),
             )
             runs[run.run_id] = run
+            self._cancel_events[run.run_id] = threading.Event()
         self._runs = runs
 
     def _save_locked(self) -> None:
@@ -255,6 +310,16 @@ def create_server(
             self.send_error(404, "Not found")
 
         def do_POST(self) -> None:  # noqa: N802
+            if self.path == "/api/runs/last/reset":
+                try:
+                    payload = manager.reset_latest_run()
+                    body = json.dumps(payload).encode("utf-8")
+                    self._send_bytes(body, "application/json; charset=utf-8", status=200)
+                except ValueError as exc:
+                    body = json.dumps({"error": str(exc)}).encode("utf-8")
+                    self._send_bytes(body, "application/json; charset=utf-8", status=400)
+                return
+
             if self.path != "/api/runs":
                 self.send_error(404, "Not found")
                 return
@@ -530,6 +595,13 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
         opacity: 0.72;
       }}
 
+      .secondary-button {{
+        margin-top: 10px;
+        color: var(--ink);
+        background: rgba(20, 33, 61, 0.08);
+        box-shadow: none;
+      }}
+
       #statusMessage {{
         min-height: 24px;
         margin-top: 12px;
@@ -612,6 +684,11 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
       .badge.failed {{
         background: rgba(162, 44, 41, 0.12);
         color: var(--danger);
+      }}
+
+      .badge.cancelled {{
+        background: rgba(20, 33, 61, 0.12);
+        color: rgba(20, 33, 61, 0.78);
       }}
 
       .summary-grid {{
@@ -747,6 +824,7 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
             </div>
 
             <button id="runButton" type="submit">Run Gear Miner</button>
+            <button id="resetButton" class="secondary-button" type="button" disabled>Clear for New Search</button>
             <div id="statusMessage" aria-live="polite"></div>
           </form>
         </aside>
@@ -769,6 +847,7 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
       const runsRoot = document.getElementById("runsRoot");
       const runForm = document.getElementById("runForm");
       const runButton = document.getElementById("runButton");
+      const resetButton = document.getElementById("resetButton");
       const statusMessage = document.getElementById("statusMessage");
 
       function escapeHtml(value) {{
@@ -786,6 +865,28 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
         return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
       }}
 
+      function latestRun(runs) {{
+        return runs.length ? runs[0] : null;
+      }}
+
+      function syncResetButton(runs) {{
+        const run = latestRun(runs);
+        if (!run) {{
+          resetButton.disabled = true;
+          resetButton.textContent = "Clear for New Search";
+          return;
+        }}
+
+        if (run.status === "queued" || run.status === "running") {{
+          resetButton.disabled = false;
+          resetButton.textContent = "Kill Last Job";
+          return;
+        }}
+
+        resetButton.disabled = false;
+        resetButton.textContent = "Clear for New Search";
+      }}
+
       function formatPrice(product) {{
         if (product.price === null || product.price === undefined || product.price === "") {{
           return "Price unavailable";
@@ -796,10 +897,12 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
 
       function renderRuns(runs) {{
         if (!runs.length) {{
+          syncResetButton(runs);
           runsRoot.innerHTML = '<div class="empty">No mining runs yet. Start with a brand and product category to create your first historical export.</div>';
           return;
         }}
 
+        syncResetButton(runs);
         runsRoot.innerHTML = runs.map((run) => {{
           const summary = run.summary || {{}};
           const preview = Array.isArray(run.product_preview) ? run.product_preview : [];
@@ -902,6 +1005,34 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
           statusMessage.textContent = error.message;
         }} finally {{
           runButton.disabled = false;
+        }}
+      }});
+
+      resetButton.addEventListener("click", async () => {{
+        resetButton.disabled = true;
+        statusMessage.textContent = "Updating the last run...";
+
+        try {{
+          const response = await fetch("/api/runs/last/reset", {{
+            method: "POST",
+          }});
+          const payload = await response.json();
+          if (!response.ok) {{
+            throw new Error(payload.error || "Unable to update the last run.");
+          }}
+
+          if (payload.action === "cancel_requested") {{
+            statusMessage.textContent = "Cancellation requested for the last job.";
+          }} else {{
+            statusMessage.textContent = "Last run cleared. The agent is ready for a new search.";
+            runForm.reset();
+            document.getElementById("category").value = "Running shoes";
+            document.getElementById("brand").focus();
+          }}
+          await refreshRuns();
+        }} catch (error) {{
+          statusMessage.textContent = error.message;
+          await refreshRuns();
         }}
       }});
 
