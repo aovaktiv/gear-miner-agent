@@ -76,7 +76,8 @@ The UI starts on `http://127.0.0.1:8765` by default and gives you:
 - `Step 2: Product category`
 - a fixed historical search window of `2020` to present
 - an output choice of `CSV` or `Excel`
-- export files with only `Brand` and `Product Name`
+- export files with `Brand`, `Product Name`, and `Photo File`
+- saved product photos in `JPG` or `PNG` when a supported image is available
 - recent run history with download links for the export file and snapshot JSON
 - a reset control that kills the newest active job or clears the newest completed run for a fresh search
 

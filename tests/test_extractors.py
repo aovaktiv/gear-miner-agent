@@ -27,11 +27,14 @@ class JsonLdProductExtractorTest(unittest.TestCase):
         self.assertEqual(ghost.model, "Ghost 16")
         self.assertEqual(ghost.price, 140.0)
         self.assertEqual(ghost.currency, "USD")
+        self.assertEqual(ghost.photo_url, "https://example.com/images/brooks-ghost-16.jpg")
+        self.assertEqual(ghost.photo_format, "jpg")
 
         clifton = products[1]
         self.assertEqual(clifton.brand, "HOKA")
         self.assertEqual(clifton.model, "Clifton 10")
         self.assertEqual(clifton.price, 145.0)
+        self.assertIsNone(clifton.photo_url)
 
 
 if __name__ == "__main__":

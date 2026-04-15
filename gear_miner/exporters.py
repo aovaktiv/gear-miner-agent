@@ -13,6 +13,7 @@ from .models import ExportFormat, ProductCandidate
 EXPORT_COLUMNS: Sequence[Tuple[str, str]] = (
     ("brand", "Brand"),
     ("name", "Product Name"),
+    ("photo_path", "Photo File"),
 )
 
 
@@ -35,6 +36,7 @@ def _product_to_export_row(product: ProductCandidate) -> dict[str, object]:
     return {
         "brand": product.brand,
         "name": product.name,
+        "photo_path": product.photo_path,
     }
 
 

@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from enum import Enum
 import json
 from pathlib import Path
+import shutil
 import threading
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import parse_qs
@@ -14,6 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .exporters import write_products_export
 from .models import ExportFormat, GearCategory, slugify
+from .photos import ProductPhotoStore
 from .pipeline import GearMinerAgent, MiningCancelled
 
 
@@ -80,12 +82,15 @@ class RunManager:
         self,
         data_dir: Path,
         agent_factory: Optional[Callable[[], GearMinerAgent]] = None,
+        photo_store: Optional[ProductPhotoStore] = None,
     ) -> None:
         self.data_dir = data_dir
         self.state_path = data_dir / "ui_runs.json"
         self.snapshots_dir = data_dir / "snapshots"
         self.exports_dir = data_dir / "exports"
+        self.photos_dir = data_dir / "photos"
         self.agent_factory = agent_factory or GearMinerAgent
+        self.photo_store = photo_store or ProductPhotoStore()
         self._lock = threading.Lock()
         self._runs: Dict[str, ManagedRun] = {}
         self._cancel_events: Dict[str, threading.Event] = {}
@@ -139,6 +144,7 @@ class RunManager:
 
             removed = self._runs.pop(latest_run.run_id)
             self._cancel_events.pop(latest_run.run_id, None)
+            self._delete_run_artifacts(removed)
             self._save_locked()
             return {
                 "action": "cleared",
@@ -164,6 +170,15 @@ class RunManager:
 
         raise FileNotFoundError(f"Run '{run_id}' does not have a {artifact} artifact yet.")
 
+    def resolve_photo(self, run_id: str, filename: str) -> tuple[Path, str]:
+        photo_path = (self.photos_dir / run_id / filename).resolve()
+        photos_root = (self.photos_dir / run_id).resolve()
+        if not str(photo_path).startswith(str(photos_root)) or not photo_path.exists():
+            raise FileNotFoundError(f"Photo '{filename}' not found for run '{run_id}'.")
+
+        content_type = "image/png" if photo_path.suffix.lower() == ".png" else "image/jpeg"
+        return photo_path, content_type
+
     def _execute_run(self, run_id: str) -> None:
         with self._lock:
             run = self._runs[run_id]
@@ -178,6 +193,7 @@ class RunManager:
             base_name = self._build_base_name(run.run_id, run.brand, category)
             snapshot_path = self.snapshots_dir / f"{base_name}.json"
             export_path = self.exports_dir / f"{base_name}.{export_format.extension}"
+            photo_dir = self.photos_dir / run.run_id
 
             agent = self.agent_factory()
             if hasattr(agent, "should_cancel"):
@@ -187,6 +203,8 @@ class RunManager:
                 brand=run.brand,
                 output_path=snapshot_path,
             )
+            self._raise_if_cancelled(run_id)
+            photo_result = self.photo_store.save_product_photos(report.products, photo_dir)
             self._raise_if_cancelled(run_id)
             write_products_export(export_path, report.products, export_format)
             self._raise_if_cancelled(run_id)
@@ -206,10 +224,14 @@ class RunManager:
                         "model": product["model"],
                         "price": product["price"],
                         "currency": product["currency"],
+                        "photo_path": product.get("photo_path"),
+                        "photo_name": Path(product["photo_path"]).name if product.get("photo_path") else None,
                         "product_url": product["product_url"],
                     }
                     for product in payload["products"][:10]
                 ]
+                run.summary["photos_saved"] = photo_result.saved_count
+                run.summary["photos_skipped"] = photo_result.skipped_count
                 self._save_locked()
         except (RunCancelled, MiningCancelled):
             with self._lock:
@@ -242,10 +264,22 @@ class RunManager:
             return None
         return max(self._runs.values(), key=lambda run: run.created_at)
 
+    def _delete_run_artifacts(self, run: ManagedRun) -> None:
+        for raw_path in (run.snapshot_path, run.export_path):
+            if raw_path:
+                path = Path(raw_path)
+                if path.exists():
+                    path.unlink()
+
+        run_photo_dir = self.photos_dir / run.run_id
+        if run_photo_dir.exists():
+            shutil.rmtree(run_photo_dir)
+
     def _load(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.snapshots_dir.mkdir(parents=True, exist_ok=True)
         self.exports_dir.mkdir(parents=True, exist_ok=True)
+        self.photos_dir.mkdir(parents=True, exist_ok=True)
         if not self.state_path.exists():
             return
 
@@ -301,6 +335,10 @@ def create_server(
             if self.path == "/api/runs":
                 payload = json.dumps({"runs": manager.list_runs()}).encode("utf-8")
                 self._send_bytes(payload, "application/json; charset=utf-8")
+                return
+
+            if self.path.startswith("/media/"):
+                self._handle_media()
                 return
 
             if self.path.startswith("/download/"):
@@ -366,6 +404,25 @@ def create_server(
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(path.stat().st_size))
             self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.end_headers()
+            self.wfile.write(path.read_bytes())
+
+        def _handle_media(self) -> None:
+            parts = self.path.strip("/").split("/")
+            if len(parts) != 3:
+                self.send_error(404, "Not found")
+                return
+
+            _, run_id, filename = parts
+            try:
+                path, content_type = manager.resolve_photo(run_id, filename)
+            except FileNotFoundError:
+                self.send_error(404, "Photo not found")
+                return
+
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(path.stat().st_size))
             self.end_headers()
             self.wfile.write(path.read_bytes())
 
@@ -693,7 +750,7 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
 
       .summary-grid {{
         display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
+        grid-template-columns: repeat(5, minmax(0, 1fr));
         gap: 10px;
         margin-top: 14px;
       }}
@@ -757,6 +814,21 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
         color: rgba(20, 33, 61, 0.68);
       }}
 
+      .preview-photo {{
+        width: 64px;
+        height: 64px;
+        object-fit: cover;
+        border-radius: 12px;
+        border: 1px solid rgba(20, 33, 61, 0.1);
+        margin-right: 10px;
+        flex: 0 0 auto;
+      }}
+
+      .preview-row {{
+        display: flex;
+        align-items: center;
+      }}
+
       @media (max-width: 920px) {{
         .layout {{
           grid-template-columns: 1fr;
@@ -788,14 +860,14 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
       <section class="hero">
         <div class="eyebrow">Control Room</div>
         <h1>Gear Miner Agent UI</h1>
-        <p>Enter a brand and product category, run a historical search from 2020 to present, and download the results as CSV or Excel when the mining pass finishes.</p>
+        <p>Enter a brand and product category, run a historical search from 2020 to present, and download the results as CSV or Excel with product photos saved as JPG or PNG when available.</p>
       </section>
 
       <section class="layout">
         <aside class="panel form-panel">
           <div class="eyebrow">Launch</div>
           <h2>Start a Mining Run</h2>
-          <p class="subcopy">The first two prompts are the key inputs: brand and product category. The agent searches archived and current source pages from 2020 to present, and the export file contains only Brand and Product Name.</p>
+          <p class="subcopy">The first two prompts are the key inputs: brand and product category. The agent searches archived and current source pages from 2020 to present, and the export file contains Brand, Product Name, and a saved JPG or PNG product photo file path.</p>
           <form id="runForm">
             <div class="field">
               <label for="brand">Step 1: Brand</label>
@@ -835,7 +907,7 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
               <div class="eyebrow">Manage</div>
               <h2>Recent Runs</h2>
             </div>
-            <p class="subcopy">Completed historical exports stay here so you can download them again later.</p>
+            <p class="subcopy">Completed historical exports and saved product photos stay here so you can download them again later.</p>
           </div>
           <div id="runsRoot" class="runs-grid"></div>
         </section>
@@ -925,7 +997,9 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
 
           const previewItems = preview.map((product) => {{
             const url = product.product_url ? `<a href="${{escapeHtml(product.product_url)}}" target="_blank" rel="noreferrer">Open product</a>` : "";
-            return `<li><strong>${{escapeHtml(product.brand)}}</strong> • ${{escapeHtml(product.name)}} ${{url}}</li>`;
+            const photo = product.photo_name ? `<img class="preview-photo" src="/media/${{run.run_id}}/${{encodeURIComponent(product.photo_name)}}" alt="${{escapeHtml(product.name)}}" />` : "";
+            const photoNote = product.photo_name ? ` • Photo: ${{escapeHtml(product.photo_name)}}` : " • Photo unavailable";
+            return `<li><div class="preview-row">${{photo}}<div><strong>${{escapeHtml(product.brand)}}</strong> • ${{escapeHtml(product.name)}}${{photoNote}} ${{url}}</div></div></li>`;
           }}).join("");
 
           const errorBlock = run.error ? `<p style="color: var(--danger); margin: 12px 0 0;">${{escapeHtml(run.error)}}</p>` : "";
@@ -955,6 +1029,10 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
                 <div class="summary-item">
                   <strong>${{summary.failed_sources ?? 0}}</strong>
                   <span>Failed sources</span>
+                </div>
+                <div class="summary-item">
+                  <strong>${{summary.photos_saved ?? 0}}</strong>
+                  <span>Photos saved</span>
                 </div>
               </div>
               ${{errorBlock}}

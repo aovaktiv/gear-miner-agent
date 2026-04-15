@@ -5,6 +5,7 @@ import time
 import unittest
 
 from gear_miner.models import HistoricalCapture
+from gear_miner.photos import ProductPhotoStore
 from gear_miner.pipeline import GearMinerAgent
 from gear_miner.ui import RunManager, RunStatus, render_dashboard_page
 
@@ -28,6 +29,10 @@ class FakeCaptureIndex:
         ]
 
 
+def fake_photo_store() -> ProductPhotoStore:
+    return ProductPhotoStore(fetch_photo=lambda _: (b"png-bytes", "image/png"))
+
+
 class GearMinerUiTest(unittest.TestCase):
     def test_run_manager_creates_excel_export_and_snapshot(self) -> None:
         html = FIXTURE.read_text(encoding="utf-8")
@@ -42,6 +47,7 @@ class GearMinerUiTest(unittest.TestCase):
                     fetch_html=fetch_html,
                     capture_index=FakeCaptureIndex(),
                 ),
+                photo_store=fake_photo_store(),
             )
             run = manager.submit_run("Brooks", "Running shoes", "excel")
             final_run = self._wait_for_run(manager, run.run_id)
@@ -51,6 +57,7 @@ class GearMinerUiTest(unittest.TestCase):
             self.assertTrue(Path(final_run["export_path"]).exists())
             self.assertTrue(Path(final_run["snapshot_path"]).exists())
             self.assertGreaterEqual(final_run["summary"]["products"], 1)
+            self.assertGreaterEqual(final_run["summary"]["photos_saved"], 1)
 
     def test_dashboard_page_contains_required_prompts(self) -> None:
         page = render_dashboard_page([])
@@ -75,15 +82,22 @@ class GearMinerUiTest(unittest.TestCase):
                     fetch_html=fetch_html,
                     capture_index=FakeCaptureIndex(),
                 ),
+                photo_store=fake_photo_store(),
             )
             run = manager.submit_run("Brooks", "Running shoes", "csv")
-            self._wait_for_run(manager, run.run_id)
+            final_run = self._wait_for_run(manager, run.run_id)
+            self.assertTrue(Path(final_run["export_path"]).exists())
+            self.assertTrue(Path(final_run["snapshot_path"]).exists())
+            self.assertTrue((Path(tmp_dir) / "photos" / run.run_id).exists())
 
             result = manager.reset_latest_run()
 
             self.assertEqual(result["action"], "cleared")
             self.assertEqual(result["run"]["run_id"], run.run_id)
             self.assertEqual(manager.list_runs(), [])
+            self.assertFalse(Path(result["run"]["export_path"]).exists())
+            self.assertFalse(Path(result["run"]["snapshot_path"]).exists())
+            self.assertFalse((Path(tmp_dir) / "photos" / run.run_id).exists())
 
     def test_reset_latest_run_requests_cancellation_for_active_run(self) -> None:
         html = FIXTURE.read_text(encoding="utf-8")
@@ -100,6 +114,7 @@ class GearMinerUiTest(unittest.TestCase):
                     fetch_html=fetch_html,
                     capture_index=FakeCaptureIndex(),
                 ),
+                photo_store=fake_photo_store(),
             )
             run = manager.submit_run("Brooks", "Running shoes", "csv")
             self._wait_for_status(manager, run.run_id, {RunStatus.RUNNING.value})

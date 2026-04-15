@@ -145,6 +145,9 @@ class ProductCandidate:
     price: Optional[float] = None
     currency: Optional[str] = None
     product_type: Optional[str] = None
+    photo_url: Optional[str] = None
+    photo_format: Optional[str] = None
+    photo_path: Optional[str] = None
     extracted_from: str = "json-ld"
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -180,6 +183,9 @@ class ProductCandidate:
             "price": self.price,
             "currency": self.currency,
             "product_type": self.product_type,
+            "photo_url": self.photo_url,
+            "photo_format": self.photo_format,
+            "photo_path": self.photo_path,
             "extracted_from": self.extracted_from,
             "metadata": self.metadata,
         }

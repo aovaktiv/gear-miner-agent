@@ -4,6 +4,7 @@ from html import unescape
 import json
 import re
 from typing import Any, Dict, Iterable, List, Optional
+from urllib.parse import urlparse
 
 from .models import ProductCandidate, SourceSeed
 from .seeds import KNOWN_RUNNING_SHOE_BRANDS
@@ -74,6 +75,8 @@ class JsonLdProductExtractor:
         offers = item.get("offers")
         offer = self._extract_offer(offers)
         product_url = self._clean_string(item.get("url")) or seed.url
+        photo_url = self._extract_photo_url(item.get("image"))
+        photo_format = infer_photo_format(photo_url)
 
         metadata = {}
         if item.get("image"):
@@ -94,6 +97,8 @@ class JsonLdProductExtractor:
             price=coerce_price(offer.get("price")) if offer else None,
             currency=self._clean_string(offer.get("priceCurrency")) if offer else None,
             product_type=self._clean_string(item.get("category")),
+            photo_url=photo_url,
+            photo_format=photo_format,
             extracted_from="json-ld",
             metadata=metadata,
         )
@@ -114,6 +119,38 @@ class JsonLdProductExtractor:
                 if isinstance(offer, dict):
                     return offer
         return None
+
+    def _extract_photo_url(self, image: Any) -> Optional[str]:
+        candidates = self._iter_image_candidates(image)
+        for candidate in candidates:
+            if infer_photo_format(candidate):
+                return candidate
+        for candidate in candidates:
+            if candidate:
+                return candidate
+        return None
+
+    def _iter_image_candidates(self, image: Any) -> List[str]:
+        candidates: List[str] = []
+
+        def collect(value: Any) -> None:
+            if isinstance(value, str):
+                cleaned = self._clean_string(value)
+                if cleaned:
+                    candidates.append(cleaned)
+                return
+            if isinstance(value, dict):
+                for key in ("url", "contentUrl"):
+                    cleaned = self._clean_string(value.get(key))
+                    if cleaned:
+                        candidates.append(cleaned)
+                return
+            if isinstance(value, list):
+                for item in value:
+                    collect(item)
+
+        collect(image)
+        return candidates
 
     def _clean_string(self, value: Any) -> Optional[str]:
         if value is None:
@@ -143,3 +180,14 @@ def coerce_price(value: Any) -> Optional[float]:
         return float(str(value).replace(",", "").strip())
     except ValueError:
         return None
+
+
+def infer_photo_format(photo_url: Optional[str]) -> Optional[str]:
+    if not photo_url:
+        return None
+    path = urlparse(photo_url).path.lower()
+    if path.endswith(".jpg") or path.endswith(".jpeg"):
+        return "jpg"
+    if path.endswith(".png"):
+        return "png"
+    return None
