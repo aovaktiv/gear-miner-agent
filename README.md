@@ -40,10 +40,23 @@ List the seeded running-shoe sources:
 python3 -m gear_miner list-sources
 ```
 
-Run a mining pass and save a snapshot:
+Run a prompted mining pass:
 
 ```bash
-python3 -m gear_miner mine --category running-shoe --limit 3 --output data/running-shoes.json
+python3 -m gear_miner mine
+```
+
+Example prompt flow:
+
+```text
+Step 1: Enter brand name: Nike
+Step 2: Enter product category: Running shoes
+```
+
+Run the same mining pass non-interactively and save a snapshot:
+
+```bash
+python3 -m gear_miner mine --brand Nike --category "Running shoes" --limit 3 --output data/running-shoes.json
 ```
 
 Run the local test suite:

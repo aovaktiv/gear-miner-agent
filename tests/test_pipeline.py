@@ -57,6 +57,32 @@ class GearMinerAgentTest(unittest.TestCase):
             self.assertEqual(snapshot["summary"]["products"], 2)
             self.assertEqual(snapshot["summary"]["failed_sources"], 1)
 
+    def test_pipeline_filters_products_to_requested_brand(self) -> None:
+        html = FIXTURE.read_text(encoding="utf-8")
+
+        def fetch_html(_: str) -> str:
+            return html
+
+        seeds = [
+            SourceSeed(
+                name="Fixture Running",
+                url="https://example.com/running",
+                kind=SourceKind.RETAILER,
+                category=GearCategory.RUNNING_SHOE,
+            ),
+        ]
+
+        agent = GearMinerAgent(fetch_html=fetch_html)
+        report = agent.mine_sources(
+            seeds=seeds,
+            category=GearCategory.RUNNING_SHOE,
+            requested_brand="Brooks",
+        )
+
+        self.assertEqual(report.requested_brand, "Brooks")
+        self.assertEqual(len(report.products), 1)
+        self.assertEqual(report.products[0].brand, "Brooks")
+
 
 if __name__ == "__main__":
     unittest.main()
