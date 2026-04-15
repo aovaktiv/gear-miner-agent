@@ -32,9 +32,9 @@ class ProductExportTest(unittest.TestCase):
             write_products_export(path, [build_product()], ExportFormat.CSV)
 
             content = path.read_text(encoding="utf-8")
-            self.assertIn("Canonical key,Brand,Model,Product name", content)
+            self.assertIn("Brand,Product Name", content)
             self.assertIn("Nike Pegasus 41", content)
-            self.assertIn("Daily trainer", content)
+            self.assertNotIn("Daily trainer", content)
 
     def test_writes_excel_export(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -45,8 +45,9 @@ class ProductExportTest(unittest.TestCase):
                 sheet_xml = workbook.read("xl/worksheets/sheet1.xml").decode("utf-8")
 
             self.assertIn("Nike Pegasus 41", sheet_xml)
-            self.assertIn("Pegasus 41", sheet_xml)
-            self.assertIn("Daily trainer", sheet_xml)
+            self.assertIn("Brand", sheet_xml)
+            self.assertIn("Product Name", sheet_xml)
+            self.assertNotIn("Daily trainer", sheet_xml)
 
 
 if __name__ == "__main__":

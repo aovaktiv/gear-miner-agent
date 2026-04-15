@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import csv
 from datetime import datetime, timezone
-import json
 from pathlib import Path
 from typing import Iterable, List, Sequence, Tuple
 from xml.sax.saxutils import escape
@@ -12,21 +11,8 @@ from .models import ExportFormat, ProductCandidate
 
 
 EXPORT_COLUMNS: Sequence[Tuple[str, str]] = (
-    ("canonical_key", "Canonical key"),
     ("brand", "Brand"),
-    ("model", "Model"),
-    ("name", "Product name"),
-    ("category", "Category"),
-    ("price", "Price"),
-    ("currency", "Currency"),
-    ("sku", "SKU"),
-    ("product_type", "Product type"),
-    ("source_name", "Source"),
-    ("source_kind", "Source kind"),
-    ("source_url", "Source URL"),
-    ("product_url", "Product URL"),
-    ("extracted_from", "Extracted from"),
-    ("metadata_json", "Metadata JSON"),
+    ("name", "Product Name"),
 )
 
 
@@ -47,21 +33,8 @@ def write_products_export(
 
 def _product_to_export_row(product: ProductCandidate) -> dict[str, object]:
     return {
-        "canonical_key": product.canonical_key,
         "brand": product.brand,
-        "model": product.model,
         "name": product.name,
-        "category": product.category.display_name,
-        "price": product.price,
-        "currency": product.currency,
-        "sku": product.sku,
-        "product_type": product.product_type,
-        "source_name": product.source_name,
-        "source_kind": product.source_kind.value,
-        "source_url": product.source_url,
-        "product_url": product.product_url,
-        "extracted_from": product.extracted_from,
-        "metadata_json": json.dumps(product.metadata, sort_keys=True),
     }
 
 

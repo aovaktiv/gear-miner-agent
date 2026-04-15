@@ -7,7 +7,7 @@ A focused web-mining project for building a structured gear catalog from public 
 Gear Miner is an agent-oriented pipeline that:
 
 - keeps a registry of gear sources to crawl
-- fetches product/category pages from the web
+- fetches archived and current product/category pages from the web
 - extracts structured product data from JSON-LD
 - normalizes raw observations into a catalog-friendly model
 - writes repeatable catalog snapshots for downstream ranking, comparison, and enrichment
@@ -21,9 +21,10 @@ The repo currently includes:
 - a Python package with a CLI
 - a local browser UI for prompting and managing mining runs
 - a running-shoe source registry
+- a historical search flow that scans 2020 through the present
 - a JSON-LD product extractor
 - a mining pipeline that fetches, extracts, normalizes, and saves a snapshot
-- CSV and Excel export output for mined product results
+- CSV and Excel export output with only `Brand` and `Product Name`
 - local tests with HTML fixtures so the core extraction path works without live network access
 
 ## Quickstart
@@ -55,6 +56,8 @@ Step 1: Enter brand name: Nike
 Step 2: Enter product category: Running shoes
 ```
 
+The miner performs a historical search from `2020` to the present and deduplicates the products it finds across those archived source pages.
+
 Run the same mining pass non-interactively and save a snapshot:
 
 ```bash
@@ -71,7 +74,9 @@ The UI starts on `http://127.0.0.1:8765` by default and gives you:
 
 - `Step 1: Brand`
 - `Step 2: Product category`
+- a fixed historical search window of `2020` to present
 - an output choice of `CSV` or `Excel`
+- export files with only `Brand` and `Product Name`
 - recent run history with download links for the export file and snapshot JSON
 
 UI-managed exports and snapshots are saved under `data/ui/`.
