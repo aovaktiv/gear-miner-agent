@@ -21,6 +21,9 @@ def build_product() -> ProductCandidate:
         price=140.0,
         currency="USD",
         product_type="Daily trainer",
+        photo_url="https://example.com/images/nike-pegasus-41.png",
+        photo_format="png",
+        photo_path="/tmp/nike-pegasus-41.png",
         metadata={"color": "Blue"},
     )
 
@@ -32,9 +35,9 @@ class ProductExportTest(unittest.TestCase):
             write_products_export(path, [build_product()], ExportFormat.CSV)
 
             content = path.read_text(encoding="utf-8")
-            self.assertIn("Brand,Product Name", content)
+            self.assertIn("Brand,Product Name,Photo File", content)
             self.assertIn("Nike Pegasus 41", content)
-            self.assertNotIn("Daily trainer", content)
+            self.assertIn("/tmp/nike-pegasus-41.png", content)
 
     def test_writes_excel_export(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -47,7 +50,8 @@ class ProductExportTest(unittest.TestCase):
             self.assertIn("Nike Pegasus 41", sheet_xml)
             self.assertIn("Brand", sheet_xml)
             self.assertIn("Product Name", sheet_xml)
-            self.assertNotIn("Daily trainer", sheet_xml)
+            self.assertIn("Photo File", sheet_xml)
+            self.assertIn("/tmp/nike-pegasus-41.png", sheet_xml)
 
 
 if __name__ == "__main__":
