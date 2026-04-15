@@ -12,8 +12,40 @@ def slugify(value: str) -> str:
     return normalized or "unknown"
 
 
+def normalize_text(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
+
 class GearCategory(str, Enum):
     RUNNING_SHOE = "running-shoe"
+
+    @property
+    def display_name(self) -> str:
+        if self is GearCategory.RUNNING_SHOE:
+            return "Running shoes"
+        return self.value.replace("-", " ").title()
+
+    @classmethod
+    def parse(cls, value: str) -> "GearCategory":
+        normalized = normalize_text(value)
+        if not normalized:
+            raise ValueError("Product category cannot be blank.")
+
+        aliases = {
+            cls.RUNNING_SHOE: {
+                "running shoe",
+                "running shoes",
+                normalize_text(cls.RUNNING_SHOE.value),
+                normalize_text(cls.RUNNING_SHOE.display_name),
+            },
+        }
+
+        for category, allowed_values in aliases.items():
+            if normalized in allowed_values:
+                return category
+
+        supported = ", ".join(category.display_name for category in cls)
+        raise ValueError(f"Unsupported product category '{value}'. Supported categories: {supported}.")
 
 
 class SourceKind(str, Enum):
@@ -34,6 +66,7 @@ class SourceSeed:
     url: str
     kind: SourceKind
     category: GearCategory
+    brand: Optional[str] = None
     tags: Tuple[str, ...] = ()
     notes: str = ""
 
@@ -43,6 +76,7 @@ class SourceSeed:
             "url": self.url,
             "kind": self.kind.value,
             "category": self.category.value,
+            "brand": self.brand,
             "tags": list(self.tags),
             "notes": self.notes,
         }
@@ -125,6 +159,7 @@ class MineReport:
     finished_at: datetime
     products: List[ProductCandidate]
     outcomes: List[CrawlOutcome]
+    requested_brand: Optional[str] = None
 
     @property
     def attempted_sources(self) -> int:
@@ -145,6 +180,7 @@ class MineReport:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "category": self.category.value,
+            "requested_brand": self.requested_brand,
             "started_at": self.started_at.isoformat(),
             "finished_at": self.finished_at.isoformat(),
             "summary": {

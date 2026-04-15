@@ -22,18 +22,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     list_sources_parser.add_argument(
         "--category",
-        default=GearCategory.RUNNING_SHOE.value,
-        choices=[category.value for category in GearCategory],
+        default=GearCategory.RUNNING_SHOE.display_name,
+        help="Product category such as 'Running shoes'.",
+    )
+    list_sources_parser.add_argument(
+        "--brand",
+        default=None,
+        help="Optional brand filter such as Nike or adidas.",
     )
 
     mine_parser = subparsers.add_parser(
         "mine",
-        help="Run a mining pass for a category.",
+        help="Run a mining pass with prompted brand/category inputs when needed.",
+    )
+    mine_parser.add_argument(
+        "--brand",
+        default=None,
+        help="Brand name such as Nike or adidas. If omitted, the CLI prompts for it.",
     )
     mine_parser.add_argument(
         "--category",
-        default=GearCategory.RUNNING_SHOE.value,
-        choices=[category.value for category in GearCategory],
+        default=None,
+        help="Product category such as 'Running shoes'. If omitted, the CLI prompts for it.",
     )
     mine_parser.add_argument(
         "--limit",
@@ -56,11 +66,53 @@ def list_sources(sources: Iterable[SourceSeed]) -> None:
         print(f"  {source.url}")
 
 
-def run_mine(category: GearCategory, limit: Optional[int], output: Optional[Path]) -> int:
-    agent = GearMinerAgent()
-    report = agent.mine_category(category=category, limit=limit, output_path=output)
+def prompt_for_value(prompt_label: str) -> str:
+    while True:
+        value = input(f"{prompt_label}: ").strip()
+        if value:
+            return value
+        print("A value is required to continue.")
 
-    print(f"Category: {report.category.value}")
+
+def resolve_category(raw_value: Optional[str], parser: argparse.ArgumentParser, prompt_if_missing: bool) -> GearCategory:
+    value = raw_value
+    if prompt_if_missing and not value:
+        value = prompt_for_value("Step 2: Enter product category")
+
+    if value is None:
+        value = GearCategory.RUNNING_SHOE.display_name
+
+    try:
+        return GearCategory.parse(value)
+    except ValueError as exc:
+        parser.error(str(exc))
+        raise AssertionError("parser.error should exit")
+
+
+def resolve_brand(raw_value: Optional[str], prompt_if_missing: bool) -> Optional[str]:
+    value = raw_value.strip() if raw_value else ""
+    if prompt_if_missing and not value:
+        value = prompt_for_value("Step 1: Enter brand name")
+    return value or None
+
+
+def run_mine(
+    category: GearCategory,
+    brand: Optional[str],
+    limit: Optional[int],
+    output: Optional[Path],
+) -> int:
+    agent = GearMinerAgent()
+    report = agent.mine_category(
+        category=category,
+        brand=brand,
+        limit=limit,
+        output_path=output,
+    )
+
+    if report.requested_brand:
+        print(f"Brand: {report.requested_brand}")
+    print(f"Category: {report.category.display_name}")
     print(f"Attempted sources: {report.attempted_sources}")
     print(f"Successful sources: {report.succeeded_sources}")
     print(f"Failed sources: {report.failed_sources}")
@@ -80,14 +132,16 @@ def run_mine(category: GearCategory, limit: Optional[int], output: Optional[Path
 def main(argv: Optional[list[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    category = GearCategory(args.category)
 
     if args.command == "list-sources":
-        list_sources(get_sources(category))
+        category = resolve_category(args.category, parser=parser, prompt_if_missing=False)
+        list_sources(get_sources(category, brand=args.brand))
         return 0
 
     if args.command == "mine":
-        return run_mine(category=category, limit=args.limit, output=args.output)
+        brand = resolve_brand(args.brand, prompt_if_missing=True)
+        category = resolve_category(args.category, parser=parser, prompt_if_missing=True)
+        return run_mine(category=category, brand=brand, limit=args.limit, output=args.output)
 
     parser.error(f"Unknown command: {args.command}")
     return 2
