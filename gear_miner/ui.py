@@ -234,6 +234,10 @@ def create_server(
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
+            if self.path == "/healthz":
+                self._send_bytes(b"ok\n", "text/plain; charset=utf-8")
+                return
+
             if self.path == "/":
                 page = render_dashboard_page(manager.list_runs())
                 self._send_bytes(page.encode("utf-8"), "text/html; charset=utf-8")

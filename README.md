@@ -76,6 +76,22 @@ The UI starts on `http://127.0.0.1:8765` by default and gives you:
 
 UI-managed exports and snapshots are saved under `data/ui/`.
 
+## Public URL
+
+This repo now includes a production deployment path for:
+
+```text
+https://brand.search.getaktiv.org
+```
+
+The deployment stack uses:
+
+- `Dockerfile` for the Gear Miner app
+- `docker-compose.yml` for the app plus reverse proxy
+- `deploy/Caddyfile` for HTTPS and proxying on `brand.search.getaktiv.org`
+
+Deployment instructions are in [Deployment](docs/deployment.md).
+
 Run the local test suite:
 
 ```bash
