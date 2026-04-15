@@ -711,14 +711,14 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
       <section class="hero">
         <div class="eyebrow">Control Room</div>
         <h1>Gear Miner Agent UI</h1>
-        <p>Enter a brand and product category, kick off a live mining run, and download the results as CSV or Excel when the crawl finishes.</p>
+        <p>Enter a brand and product category, run a historical search from 2020 to present, and download the results as CSV or Excel when the mining pass finishes.</p>
       </section>
 
       <section class="layout">
         <aside class="panel form-panel">
           <div class="eyebrow">Launch</div>
           <h2>Start a Mining Run</h2>
-          <p class="subcopy">The first two prompts are the key inputs: brand and product category. Choose an export format, then the agent will mine matching product sources.</p>
+          <p class="subcopy">The first two prompts are the key inputs: brand and product category. The agent searches archived and current source pages from 2020 to present, and the export file contains only Brand and Product Name.</p>
           <form id="runForm">
             <div class="field">
               <label for="brand">Step 1: Brand</label>
@@ -729,7 +729,7 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
             <div class="field">
               <label for="category">Step 2: Product category</label>
               <input id="category" name="category" type="text" placeholder="Running shoes" value="Running shoes" required />
-              <small>Human-friendly category text is supported.</small>
+              <small>Human-friendly category text is supported. Historical search window: 2020 to present.</small>
             </div>
 
             <div class="field">
@@ -757,7 +757,7 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
               <div class="eyebrow">Manage</div>
               <h2>Recent Runs</h2>
             </div>
-            <p class="subcopy">Completed exports stay here so you can download them again later.</p>
+            <p class="subcopy">Completed historical exports stay here so you can download them again later.</p>
           </div>
           <div id="runsRoot" class="runs-grid"></div>
         </section>
@@ -796,7 +796,7 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
 
       function renderRuns(runs) {{
         if (!runs.length) {{
-          runsRoot.innerHTML = '<div class="empty">No mining runs yet. Start with a brand and product category to create your first export.</div>';
+          runsRoot.innerHTML = '<div class="empty">No mining runs yet. Start with a brand and product category to create your first historical export.</div>';
           return;
         }}
 
@@ -822,7 +822,7 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
 
           const previewItems = preview.map((product) => {{
             const url = product.product_url ? `<a href="${{escapeHtml(product.product_url)}}" target="_blank" rel="noreferrer">Open product</a>` : "";
-            return `<li><strong>${{escapeHtml(product.name)}}</strong> • ${{escapeHtml(product.brand)}} • ${{escapeHtml(formatPrice(product))}} ${{url}}</li>`;
+            return `<li><strong>${{escapeHtml(product.brand)}}</strong> • ${{escapeHtml(product.name)}} ${{url}}</li>`;
           }}).join("");
 
           const errorBlock = run.error ? `<p style="color: var(--danger); margin: 12px 0 0;">${{escapeHtml(run.error)}}</p>` : "";
@@ -832,7 +832,7 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
               <div class="run-top">
                 <div>
                   <h3 class="run-title">${{escapeHtml(run.brand)}} · ${{escapeHtml(run.category_input)}}</h3>
-                  <div class="run-meta">Created ${{escapeHtml(formatTimestamp(run.created_at))}} · Output ${{escapeHtml(run.export_format.toUpperCase())}}</div>
+                  <div class="run-meta">Created ${{escapeHtml(formatTimestamp(run.created_at))}} · Historical window 2020-present · Output ${{escapeHtml(run.export_format.toUpperCase())}}</div>
                 </div>
                 <span class="badge ${{escapeHtml(run.status)}}">${{escapeHtml(run.status)}}</span>
               </div>
@@ -843,7 +843,7 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
                 </div>
                 <div class="summary-item">
                   <strong>${{summary.unique_models ?? 0}}</strong>
-                  <span>Unique models</span>
+                  <span>Unique products</span>
                 </div>
                 <div class="summary-item">
                   <strong>${{summary.succeeded_sources ?? 0}}</strong>
@@ -878,7 +878,7 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
       runForm.addEventListener("submit", async (event) => {{
         event.preventDefault();
         runButton.disabled = true;
-        statusMessage.textContent = "Launching the mining run...";
+        statusMessage.textContent = "Launching the historical mining run...";
 
         const formData = new FormData(runForm);
         const body = new URLSearchParams();
@@ -896,7 +896,7 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
           if (!response.ok) {{
             throw new Error(payload.error || "Unable to start the mining run.");
           }}
-          statusMessage.textContent = "Run started. The results card will update when mining finishes.";
+          statusMessage.textContent = "Run started. The results card will update when the 2020-present historical search finishes.";
           await refreshRuns();
         }} catch (error) {{
           statusMessage.textContent = error.message;

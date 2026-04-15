@@ -97,6 +97,19 @@ class CrawlStatus(str, Enum):
 
 
 @dataclass(frozen=True)
+class HistoricalCapture:
+    timestamp: str
+    original_url: str
+    archived_url: str
+
+    @property
+    def year(self) -> Optional[int]:
+        if len(self.timestamp) >= 4 and self.timestamp[:4].isdigit():
+            return int(self.timestamp[:4])
+        return None
+
+
+@dataclass(frozen=True)
 class SourceSeed:
     name: str
     url: str
@@ -177,6 +190,7 @@ class CrawlOutcome:
     source: SourceSeed
     status: CrawlStatus
     extracted_count: int = 0
+    capture_count: int = 0
     error: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -184,6 +198,7 @@ class CrawlOutcome:
             "source": self.source.to_dict(),
             "status": self.status.value,
             "extracted_count": self.extracted_count,
+            "capture_count": self.capture_count,
             "error": self.error,
         }
 
@@ -196,6 +211,8 @@ class MineReport:
     products: List[ProductCandidate]
     outcomes: List[CrawlOutcome]
     requested_brand: Optional[str] = None
+    search_start_year: int = 2020
+    search_end_year: int = field(default_factory=lambda: datetime.utcnow().year)
 
     @property
     def attempted_sources(self) -> int:
@@ -217,6 +234,8 @@ class MineReport:
         return {
             "category": self.category.value,
             "requested_brand": self.requested_brand,
+            "search_start_year": self.search_start_year,
+            "search_end_year": self.search_end_year,
             "started_at": self.started_at.isoformat(),
             "finished_at": self.finished_at.isoformat(),
             "summary": {
