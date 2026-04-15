@@ -19,9 +19,11 @@ The first vertical is `running-shoe`, but the project is designed to expand into
 The repo currently includes:
 
 - a Python package with a CLI
+- a local browser UI for prompting and managing mining runs
 - a running-shoe source registry
 - a JSON-LD product extractor
 - a mining pipeline that fetches, extracts, normalizes, and saves a snapshot
+- CSV and Excel export output for mined product results
 - local tests with HTML fixtures so the core extraction path works without live network access
 
 ## Quickstart
@@ -58,6 +60,21 @@ Run the same mining pass non-interactively and save a snapshot:
 ```bash
 python3 -m gear_miner mine --brand Nike --category "Running shoes" --limit 3 --output data/running-shoes.json
 ```
+
+Launch the local browser UI:
+
+```bash
+python3 -m gear_miner ui
+```
+
+The UI starts on `http://127.0.0.1:8765` by default and gives you:
+
+- `Step 1: Brand`
+- `Step 2: Product category`
+- an output choice of `CSV` or `Excel`
+- recent run history with download links for the export file and snapshot JSON
+
+UI-managed exports and snapshots are saved under `data/ui/`.
 
 Run the local test suite:
 
