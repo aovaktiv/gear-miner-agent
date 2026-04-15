@@ -48,6 +48,42 @@ class GearCategory(str, Enum):
         raise ValueError(f"Unsupported product category '{value}'. Supported categories: {supported}.")
 
 
+class ExportFormat(str, Enum):
+    CSV = "csv"
+    EXCEL = "excel"
+
+    @property
+    def extension(self) -> str:
+        if self is ExportFormat.CSV:
+            return "csv"
+        return "xlsx"
+
+    @property
+    def label(self) -> str:
+        if self is ExportFormat.CSV:
+            return "CSV"
+        return "Excel"
+
+    @property
+    def content_type(self) -> str:
+        if self is ExportFormat.CSV:
+            return "text/csv; charset=utf-8"
+        return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+    @classmethod
+    def parse(cls, value: str) -> "ExportFormat":
+        normalized = normalize_text(value)
+        aliases = {
+            cls.CSV: {"csv", "comma separated values"},
+            cls.EXCEL: {"excel", "xlsx", "spreadsheet"},
+        }
+        for export_format, allowed_values in aliases.items():
+            if normalized in allowed_values:
+                return export_format
+        supported = ", ".join(option.label for option in cls)
+        raise ValueError(f"Unsupported export format '{value}'. Supported formats: {supported}.")
+
+
 class SourceKind(str, Enum):
     BRAND = "brand"
     RETAILER = "retailer"

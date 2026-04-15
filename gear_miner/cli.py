@@ -7,6 +7,7 @@ from typing import Iterable, Optional
 from .models import GearCategory, SourceSeed
 from .pipeline import GearMinerAgent
 from .seeds import get_sources
+from .ui import serve_ui
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -56,6 +57,28 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Optional path to save the snapshot JSON.",
+    )
+
+    ui_parser = subparsers.add_parser(
+        "ui",
+        help="Launch the local browser UI for prompting and managing mining runs.",
+    )
+    ui_parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Host interface for the local UI server.",
+    )
+    ui_parser.add_argument(
+        "--port",
+        type=int,
+        default=8765,
+        help="Port for the local UI server.",
+    )
+    ui_parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=Path("data/ui"),
+        help="Directory for UI state, snapshots, and exports.",
     )
     return parser
 
@@ -142,6 +165,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         brand = resolve_brand(args.brand, prompt_if_missing=True)
         category = resolve_category(args.category, parser=parser, prompt_if_missing=True)
         return run_mine(category=category, brand=brand, limit=args.limit, output=args.output)
+
+    if args.command == "ui":
+        return serve_ui(host=args.host, port=args.port, data_dir=args.data_dir)
 
     parser.error(f"Unknown command: {args.command}")
     return 2
