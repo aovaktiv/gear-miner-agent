@@ -58,6 +58,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional path to save the snapshot JSON.",
     )
+    mine_parser.add_argument(
+        "--allow-domains",
+        default=None,
+        help="Optional comma-separated domain allow list for crawling.",
+    )
+    mine_parser.add_argument(
+        "--block-domains",
+        default=None,
+        help="Optional comma-separated domain block list for crawling.",
+    )
 
     ui_parser = subparsers.add_parser(
         "ui",
@@ -124,6 +134,8 @@ def run_mine(
     brand: Optional[str],
     limit: Optional[int],
     output: Optional[Path],
+    allow_domains: Optional[str],
+    block_domains: Optional[str],
 ) -> int:
     agent = GearMinerAgent()
     report = agent.mine_category(
@@ -131,6 +143,8 @@ def run_mine(
         brand=brand,
         limit=limit,
         output_path=output,
+        allow_domains=allow_domains,
+        block_domains=block_domains,
     )
 
     if report.requested_brand:
@@ -146,6 +160,7 @@ def run_mine(
     print(f"Unique models: {report.unique_models}")
     if report.warnings:
         print(f"Warnings: {len(report.warnings)}")
+    print(f"Pages crawled: {report.pages_crawled}")
 
     failed = [outcome for outcome in report.outcomes if outcome.error]
     for outcome in failed:
@@ -172,7 +187,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.command == "mine":
         brand = resolve_brand(args.brand, prompt_if_missing=True)
         category = resolve_category(args.category, parser=parser, prompt_if_missing=True)
-        return run_mine(category=category, brand=brand, limit=args.limit, output=args.output)
+        return run_mine(
+            category=category,
+            brand=brand,
+            limit=args.limit,
+            output=args.output,
+            allow_domains=args.allow_domains,
+            block_domains=args.block_domains,
+        )
 
     if args.command == "ui":
         return serve_ui(host=args.host, port=args.port, data_dir=args.data_dir)

@@ -239,6 +239,10 @@ class MineReport:
     def unique_models(self) -> int:
         return len({product.canonical_key for product in self.products})
 
+    @property
+    def pages_crawled(self) -> int:
+        return sum(outcome.capture_count for outcome in self.outcomes)
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "category": self.category.value,
@@ -256,6 +260,7 @@ class MineReport:
                 "failed_sources": self.failed_sources,
                 "products": len(self.products),
                 "unique_models": self.unique_models,
+                "pages_crawled": self.pages_crawled,
                 "warning_count": len(self.warnings),
             },
             "outcomes": [outcome.to_dict() for outcome in self.outcomes],

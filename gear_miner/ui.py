@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from .domains import parse_domain_list
 from .exporters import write_products_export
 from .models import ExportFormat, GearCategory, slugify
 from .photos import ProductPhotoStore
@@ -45,6 +46,8 @@ class ManagedRun:
     brand: str
     category_input: str
     category: str
+    allow_domains: List[str]
+    block_domains: List[str]
     export_format: str
     status: str
     created_at: str
@@ -67,6 +70,8 @@ class ManagedRun:
             "brand": self.brand,
             "category_input": self.category_input,
             "category": self.category,
+            "allow_domains": self.allow_domains,
+            "block_domains": self.block_domains,
             "export_format": self.export_format,
             "status": self.status,
             "created_at": self.created_at,
@@ -104,18 +109,29 @@ class RunManager:
         self._cancel_events: Dict[str, threading.Event] = {}
         self._load()
 
-    def submit_run(self, brand: str, category_input: str, export_format_input: str) -> ManagedRun:
+    def submit_run(
+        self,
+        brand: str,
+        category_input: str,
+        export_format_input: str,
+        allow_domains_input: str = "",
+        block_domains_input: str = "",
+    ) -> ManagedRun:
         brand_value = brand.strip()
         if not brand_value:
             raise ValueError("Brand is required.")
 
         category = GearCategory.parse(category_input)
         export_format = ExportFormat.parse(export_format_input)
+        allow_domains = list(parse_domain_list(allow_domains_input))
+        block_domains = list(parse_domain_list(block_domains_input))
         run = ManagedRun(
             run_id=uuid4().hex[:12],
             brand=brand_value,
             category_input=category_input.strip(),
             category=category.value,
+            allow_domains=allow_domains,
+            block_domains=block_domains,
             export_format=export_format.value,
             status=RunStatus.QUEUED.value,
             created_at=utc_now_iso(),
@@ -141,17 +157,27 @@ class RunManager:
             if latest_run is None:
                 raise ValueError("There is no run to reset.")
 
-            if latest_run.status in {RunStatus.QUEUED.value, RunStatus.RUNNING.value}:
-                cancel_event = self._cancel_events.setdefault(latest_run.run_id, threading.Event())
+            run_id = latest_run.run_id
+
+        return self.manage_run(run_id)
+
+    def manage_run(self, run_id: str) -> Dict[str, Any]:
+        with self._lock:
+            run = self._runs.get(run_id)
+            if run is None:
+                raise ValueError(f"Unknown run '{run_id}'.")
+
+            if run.status in {RunStatus.QUEUED.value, RunStatus.RUNNING.value}:
+                cancel_event = self._cancel_events.setdefault(run.run_id, threading.Event())
                 cancel_event.set()
                 self._save_locked()
                 return {
                     "action": "cancel_requested",
-                    "run": latest_run.to_dict(),
+                    "run": run.to_dict(),
                 }
 
-            removed = self._runs.pop(latest_run.run_id)
-            self._cancel_events.pop(latest_run.run_id, None)
+            removed = self._runs.pop(run.run_id)
+            self._cancel_events.pop(run.run_id, None)
             self._delete_run_artifacts(removed)
             self._save_locked()
             return {
@@ -218,6 +244,8 @@ class RunManager:
                 category=category,
                 brand=run.brand,
                 output_path=snapshot_path,
+                allow_domains=run.allow_domains,
+                block_domains=run.block_domains,
             )
             self._raise_if_cancelled(run_id)
             self._update_progress(run_id, 82, 100, "Saving product photos")
@@ -354,6 +382,8 @@ class RunManager:
                 brand=item["brand"],
                 category_input=item.get("category_input", item["category"]),
                 category=item["category"],
+                allow_domains=item.get("allow_domains", []),
+                block_domains=item.get("block_domains", []),
                 export_format=item["export_format"],
                 status=item["status"],
                 created_at=item["created_at"],
@@ -425,6 +455,21 @@ def create_server(
                     self._send_bytes(body, "application/json; charset=utf-8", status=400)
                 return
 
+            if self.path.startswith("/api/runs/") and self.path.endswith("/reset"):
+                parts = self.path.strip("/").split("/")
+                if len(parts) != 4:
+                    self.send_error(404, "Not found")
+                    return
+                _, _, run_id, _ = parts
+                try:
+                    payload = manager.manage_run(run_id)
+                    body = json.dumps(payload).encode("utf-8")
+                    self._send_bytes(body, "application/json; charset=utf-8", status=200)
+                except ValueError as exc:
+                    body = json.dumps({"error": str(exc)}).encode("utf-8")
+                    self._send_bytes(body, "application/json; charset=utf-8", status=400)
+                return
+
             if self.path != "/api/runs":
                 self.send_error(404, "Not found")
                 return
@@ -435,6 +480,8 @@ def create_server(
                     brand=payload.get("brand", ""),
                     category_input=payload.get("category", ""),
                     export_format_input=payload.get("export_format", ExportFormat.CSV.value),
+                    allow_domains_input=payload.get("allow_domains", ""),
+                    block_domains_input=payload.get("block_domains", ""),
                 )
                 body = json.dumps({"run": run.to_dict()}).encode("utf-8")
                 self._send_bytes(body, "application/json; charset=utf-8", status=201)
@@ -732,6 +779,47 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
         color: rgba(20, 33, 61, 0.75);
       }}
 
+      .history-shell {{
+        margin-top: 22px;
+        padding-top: 20px;
+        border-top: 1px solid rgba(20, 33, 61, 0.08);
+      }}
+
+      .history-list {{
+        display: grid;
+        gap: 10px;
+        max-height: 320px;
+        overflow-y: auto;
+      }}
+
+      .history-item {{
+        width: 100%;
+        padding: 14px;
+        border-radius: 16px;
+        border: 1px solid rgba(20, 33, 61, 0.1);
+        background: rgba(255, 255, 255, 0.75);
+        color: var(--ink);
+        text-align: left;
+        box-shadow: none;
+      }}
+
+      .history-item.selected {{
+        border-color: rgba(255, 107, 53, 0.42);
+        background: rgba(255, 107, 53, 0.12);
+      }}
+
+      .history-title {{
+        display: block;
+        font-weight: 800;
+      }}
+
+      .history-meta {{
+        display: block;
+        margin-top: 4px;
+        color: rgba(20, 33, 61, 0.68);
+        font-size: 0.9rem;
+      }}
+
       .runs-panel {{
         padding: 22px;
       }}
@@ -755,6 +843,11 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
         background: rgba(255, 255, 255, 0.78);
         padding: 18px;
         animation: reveal 280ms ease both;
+      }}
+
+      .run-card.selected {{
+        border-color: rgba(255, 107, 53, 0.42);
+        box-shadow: 0 18px 40px rgba(255, 107, 53, 0.12);
       }}
 
       @keyframes reveal {{
@@ -817,7 +910,7 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
 
       .summary-grid {{
         display: grid;
-        grid-template-columns: repeat(5, minmax(0, 1fr));
+        grid-template-columns: repeat(6, minmax(0, 1fr));
         gap: 10px;
         margin-top: 14px;
       }}
@@ -955,14 +1048,14 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
       <section class="hero">
         <div class="eyebrow">Control Room</div>
         <h1>Gear Miner Agent UI</h1>
-        <p>Enter a brand and product category, run a live web search across the open web, and download the results as CSV or Excel with product photos saved as JPG or PNG when available.</p>
+        <p>Enter a brand and product category, run a live web search across the open web, crawl deeper through paginated pages, and download the results as CSV or Excel with product photos saved as JPG or PNG when available.</p>
       </section>
 
       <section class="layout">
         <aside class="panel form-panel">
           <div class="eyebrow">Launch</div>
           <h2>Start a Mining Run</h2>
-          <p class="subcopy">The first two prompts are the key inputs: brand and product category. The agent runs a live search, crawls the current web for matching products, and exports Brand, Product Name, and a saved JPG or PNG product photo file path.</p>
+          <p class="subcopy">The first two prompts are the key inputs: brand and product category. The agent runs a live search, follows relevant pagination and product links, and exports Brand, Product Name, and a saved JPG or PNG product photo file path.</p>
           <form id="runForm">
             <div class="field">
               <label for="brand">Step 1: Brand</label>
@@ -990,10 +1083,29 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
               </div>
             </div>
 
+            <div class="field">
+              <label for="allowDomains">Allow domains</label>
+              <input id="allowDomains" name="allow_domains" type="text" placeholder="nike.com, runningwarehouse.com" />
+              <small>Optional comma-separated allow list. Leave blank to let each discovered source crawl within its own domain.</small>
+            </div>
+
+            <div class="field">
+              <label for="blockDomains">Block domains</label>
+              <input id="blockDomains" name="block_domains" type="text" placeholder="ebay.com, amazon.com" />
+              <small>Optional comma-separated block list. Matching domains and subdomains are skipped during crawling.</small>
+            </div>
+
             <button id="runButton" type="submit">Run Gear Miner</button>
-            <button id="resetButton" class="secondary-button" type="button" disabled>Clear for New Search</button>
+            <button id="resetButton" class="secondary-button" type="button" disabled>Terminate Selected Search</button>
             <div id="statusMessage" aria-live="polite"></div>
           </form>
+
+          <section class="history-shell">
+            <div class="eyebrow">History</div>
+            <h2>Search History</h2>
+            <p class="subcopy">Select any prior search to terminate it if it is still running, or clear it after completion.</p>
+            <div id="historyRoot" class="history-list"></div>
+          </section>
         </aside>
 
         <section class="panel runs-panel">
@@ -1011,7 +1123,10 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
 
     <script>
       const initialRuns = {initial_runs_json};
+      let currentRuns = initialRuns;
+      let selectedRunId = initialRuns.length ? initialRuns[0].run_id : null;
       const runsRoot = document.getElementById("runsRoot");
+      const historyRoot = document.getElementById("historyRoot");
       const runForm = document.getElementById("runForm");
       const runButton = document.getElementById("runButton");
       const resetButton = document.getElementById("resetButton");
@@ -1036,22 +1151,42 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
         return runs.length ? runs[0] : null;
       }}
 
+      function getRunById(runs, runId) {{
+        return runs.find((run) => run.run_id === runId) || null;
+      }}
+
+      function syncSelectedRun(runs) {{
+        if (!runs.length) {{
+          selectedRunId = null;
+          return null;
+        }}
+
+        const selected = getRunById(runs, selectedRunId);
+        if (selected) {{
+          return selected;
+        }}
+
+        const latest = latestRun(runs);
+        selectedRunId = latest ? latest.run_id : null;
+        return latest;
+      }}
+
       function syncResetButton(runs) {{
-        const run = latestRun(runs);
+        const run = syncSelectedRun(runs);
         if (!run) {{
           resetButton.disabled = true;
-          resetButton.textContent = "Clear for New Search";
+          resetButton.textContent = "Terminate Selected Search";
           return;
         }}
 
         if (run.status === "queued" || run.status === "running") {{
           resetButton.disabled = false;
-          resetButton.textContent = "Kill Last Job";
+          resetButton.textContent = "Terminate Selected Search";
           return;
         }}
 
         resetButton.disabled = false;
-        resetButton.textContent = "Clear for New Search";
+        resetButton.textContent = "Clear Selected Search";
       }}
 
       function formatPrice(product) {{
@@ -1062,7 +1197,28 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
         return `${{currency}}${{product.price}}`;
       }}
 
+      function renderHistory(runs) {{
+        const selected = syncSelectedRun(runs);
+        if (!runs.length) {{
+          historyRoot.innerHTML = '<div class="empty">No searches yet. Your run history will appear here.</div>';
+          return;
+        }}
+
+        historyRoot.innerHTML = runs.map((run) => {{
+          const selectedClass = selected && run.run_id === selected.run_id ? " selected" : "";
+          return `
+            <button type="button" class="history-item${{selectedClass}}" data-run-id="${{escapeHtml(run.run_id)}}">
+              <span class="history-title">${{escapeHtml(run.brand)}} · ${{escapeHtml(run.category_input)}}</span>
+              <span class="history-meta">${{escapeHtml(formatTimestamp(run.created_at))}} · ${{escapeHtml(run.status)}} · ${{escapeHtml(run.export_format.toUpperCase())}}</span>
+            </button>
+          `;
+        }}).join("");
+      }}
+
       function renderRuns(runs) {{
+        currentRuns = runs;
+        const selected = syncSelectedRun(runs);
+        renderHistory(runs);
         if (!runs.length) {{
           syncResetButton(runs);
           runsRoot.innerHTML = '<div class="empty">No mining runs yet. Start with a brand and product category to create your first live-search export.</div>';
@@ -1079,6 +1235,19 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
           const progressTotal = Math.max(Number(run.progress_total || 100), 1);
           const progressCurrent = Math.min(Math.max(Number(run.progress_current || 0), 0), progressTotal);
           const progressPercent = Math.round((progressCurrent / progressTotal) * 100);
+          const allowDomains = Array.isArray(run.allow_domains) ? run.allow_domains : [];
+          const blockDomains = Array.isArray(run.block_domains) ? run.block_domains : [];
+          const controls = [];
+          const selectedClass = selected && run.run_id === selected.run_id ? " selected" : "";
+
+          if (allowDomains.length) {{
+            controls.push(`Allow ${{allowDomains.join(", ")}}`);
+          }} else {{
+            controls.push("Allow source domains");
+          }}
+          if (blockDomains.length) {{
+            controls.push(`Block ${{blockDomains.join(", ")}}`);
+          }}
 
           if (run.export_path) {{
             const outputLabel = run.export_format === "excel" ? "Download Excel" : "Download CSV";
@@ -1105,11 +1274,12 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
           const errorBlock = run.error ? `<p style="color: var(--danger); margin: 12px 0 0;">${{escapeHtml(run.error)}}</p>` : "";
 
           return `
-            <article class="run-card">
+            <article class="run-card${{selectedClass}}">
               <div class="run-top">
                 <div>
                   <h3 class="run-title">${{escapeHtml(run.brand)}} · ${{escapeHtml(run.category_input)}}</h3>
                   <div class="run-meta">Created ${{escapeHtml(formatTimestamp(run.created_at))}} · Live web search · Output ${{escapeHtml(run.export_format.toUpperCase())}}</div>
+                  <div class="run-meta">${{escapeHtml(controls.join(" · "))}}</div>
                 </div>
                 <span class="badge ${{escapeHtml(run.status)}}">${{escapeHtml(run.status)}}</span>
               </div>
@@ -1130,6 +1300,10 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
                 <div class="summary-item">
                   <strong>${{summary.unique_models ?? 0}}</strong>
                   <span>Unique products</span>
+                </div>
+                <div class="summary-item">
+                  <strong>${{summary.pages_crawled ?? 0}}</strong>
+                  <span>Pages crawled</span>
                 </div>
                 <div class="summary-item">
                   <strong>${{summary.succeeded_sources ?? 0}}</strong>
@@ -1190,6 +1364,7 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
           if (!response.ok) {{
             throw new Error(payload.error || "Unable to start the mining run.");
           }}
+          selectedRunId = payload.run && payload.run.run_id ? payload.run.run_id : selectedRunId;
           statusMessage.textContent = "Run started. The progress bar will update as live search, crawling, photos, and export steps complete.";
           await refreshRuns();
         }} catch (error) {{
@@ -1200,22 +1375,31 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
       }});
 
       resetButton.addEventListener("click", async () => {{
+        const run = syncSelectedRun(currentRuns);
+        if (!run) {{
+          statusMessage.textContent = "Select a search from history first.";
+          renderRuns(currentRuns);
+          return;
+        }}
+
         resetButton.disabled = true;
-        statusMessage.textContent = "Updating the last run...";
+        statusMessage.textContent = run.status === "queued" || run.status === "running"
+          ? "Requesting cancellation for the selected search..."
+          : "Clearing the selected search...";
 
         try {{
-          const response = await fetch("/api/runs/last/reset", {{
+          const response = await fetch(`/api/runs/${{run.run_id}}/reset`, {{
             method: "POST",
           }});
           const payload = await response.json();
           if (!response.ok) {{
-            throw new Error(payload.error || "Unable to update the last run.");
+            throw new Error(payload.error || "Unable to update the selected search.");
           }}
 
           if (payload.action === "cancel_requested") {{
-            statusMessage.textContent = "Cancellation requested for the last job.";
+            statusMessage.textContent = "Cancellation requested for the selected search.";
           }} else {{
-            statusMessage.textContent = "Last run cleared. The agent is ready for a new search.";
+            statusMessage.textContent = "Selected search cleared. The agent is ready for a new search.";
             runForm.reset();
             document.getElementById("category").value = "Running shoes";
             document.getElementById("brand").focus();
@@ -1225,6 +1409,15 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
           statusMessage.textContent = error.message;
           await refreshRuns();
         }}
+      }});
+
+      historyRoot.addEventListener("click", (event) => {{
+        const button = event.target.closest("[data-run-id]");
+        if (!button) {{
+          return;
+        }}
+        selectedRunId = button.getAttribute("data-run-id");
+        renderRuns(currentRuns);
       }});
 
       renderRuns(initialRuns);
