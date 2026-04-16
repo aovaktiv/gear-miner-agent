@@ -7,6 +7,7 @@ from typing import Callable, List, Optional
 from urllib.parse import parse_qs, unquote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
+from .domains import is_url_allowed
 from .models import GearCategory, SourceKind, SourceSeed, normalize_text
 
 
@@ -57,6 +58,8 @@ class LiveWebDiscovery:
         brand: str,
         category: GearCategory,
         limit: int = 20,
+        allow_domains: tuple[str, ...] = (),
+        block_domains: tuple[str, ...] = (),
         progress_callback: Optional[DiscoveryProgressCallback] = None,
     ) -> DiscoveryReport:
         report = DiscoveryReport()
@@ -77,6 +80,8 @@ class LiveWebDiscovery:
             for result in results:
                 normalized_url = normalize_result_url(result.url)
                 if not normalized_url or normalized_url in seen_urls:
+                    continue
+                if not is_url_allowed(normalized_url, allow_domains=allow_domains, block_domains=block_domains):
                     continue
                 seen_urls.add(normalized_url)
                 report.sources.append(source_seed_from_result(result, category=category, brand=brand))

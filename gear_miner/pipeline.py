@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Iterable, List, Optional
+from typing import Callable, Iterable, List, Optional, Sequence
 from urllib.request import Request, urlopen
 
+from .crawler import CrawlCancelled, CrawlSettings, MultiPageCrawler
+from .domains import is_url_allowed, parse_domain_list
 from .extractors import JsonLdProductExtractor
 from .history import WaybackCaptureIndex
 from .live_search import LiveWebDiscovery
@@ -56,6 +58,8 @@ class GearMinerAgent:
         should_cancel: Optional[ShouldCancel] = None,
         progress_callback: Optional[ProgressCallback] = None,
         default_live_source_limit: int = 12,
+        default_live_page_limit: int = 6,
+        default_live_crawl_depth: int = 2,
     ) -> None:
         self.fetch_html = fetch_html or default_fetch_html
         self.extractor = extractor or JsonLdProductExtractor()
@@ -66,6 +70,8 @@ class GearMinerAgent:
         self.should_cancel = should_cancel or (lambda: False)
         self.progress_callback = progress_callback or (lambda _current, _total, _label: None)
         self.default_live_source_limit = default_live_source_limit
+        self.default_live_page_limit = default_live_page_limit
+        self.default_live_crawl_depth = default_live_crawl_depth
 
     def mine_category(
         self,
@@ -75,12 +81,16 @@ class GearMinerAgent:
         output_path: Optional[Path] = None,
         start_year: Optional[int] = None,
         end_year: Optional[int] = None,
+        allow_domains: Sequence[str] | str | None = None,
+        block_domains: Sequence[str] | str | None = None,
     ) -> MineReport:
         return self.mine_live_category(
             category=category,
             brand=brand,
             limit=limit,
             output_path=output_path,
+            allow_domains=allow_domains,
+            block_domains=block_domains,
         )
 
     def mine_live_category(
@@ -89,8 +99,12 @@ class GearMinerAgent:
         brand: Optional[str] = None,
         limit: Optional[int] = None,
         output_path: Optional[Path] = None,
+        allow_domains: Sequence[str] | str | None = None,
+        block_domains: Sequence[str] | str | None = None,
     ) -> MineReport:
         source_limit = limit or self.default_live_source_limit
+        parsed_allow_domains = parse_domain_list(allow_domains)
+        parsed_block_domains = parse_domain_list(block_domains)
         warnings: List[str] = []
         configured_sources = get_sources(category, brand=brand)
         discovered_sources = []
@@ -102,6 +116,8 @@ class GearMinerAgent:
                 brand=brand,
                 category=category,
                 limit=source_limit,
+                allow_domains=parsed_allow_domains,
+                block_domains=parsed_block_domains,
                 progress_callback=lambda current, total, label: self._report_weighted_progress(
                     5,
                     25,
@@ -117,6 +133,16 @@ class GearMinerAgent:
             warnings.append("No brand was provided, so live search discovery was skipped.")
 
         seeds = merge_sources(discovered_sources, configured_sources, limit=source_limit)
+        filtered_seeds = filter_sources_by_domains(
+            seeds,
+            allow_domains=parsed_allow_domains,
+            block_domains=parsed_block_domains,
+        )
+        if len(filtered_seeds) < len(seeds):
+            warnings.append("Some sources were skipped because of the current domain allow/block controls.")
+        seeds = filtered_seeds
+        if not seeds:
+            raise ValueError("No live sources matched the current domain allow/block controls.")
         if discovered_sources:
             self._report_progress(28, 100, f"Discovered {len(discovered_sources)} live web sources")
         elif seeds:
@@ -132,6 +158,8 @@ class GearMinerAgent:
             output_path=output_path,
             warnings=warnings,
             queries_attempted=queries_attempted,
+            allow_domains=parsed_allow_domains,
+            block_domains=parsed_block_domains,
         )
         self._report_progress(80, 100, "Live crawling complete")
         return report
@@ -230,39 +258,62 @@ class GearMinerAgent:
         output_path: Optional[Path] = None,
         warnings: Optional[List[str]] = None,
         queries_attempted: int = 0,
+        allow_domains: Sequence[str] = (),
+        block_domains: Sequence[str] = (),
     ) -> MineReport:
         started_at = datetime.now(timezone.utc)
         products: List[ProductCandidate] = []
         outcomes: List[CrawlOutcome] = []
         seed_list = list(seeds)
         total_sources = len(seed_list)
+        crawler = MultiPageCrawler(
+            fetch_html=self.fetch_html,
+            extractor=self.extractor,
+            should_cancel=self.should_cancel,
+        )
+        crawl_settings = CrawlSettings(
+            allow_domains=allow_domains,
+            block_domains=block_domains,
+            max_pages_per_source=self.default_live_page_limit,
+            max_depth=self.default_live_crawl_depth,
+        )
 
         if total_sources == 0:
             raise ValueError("No live sources were available to crawl.")
 
         for index, seed in enumerate(seed_list, start=1):
             self._raise_if_cancelled()
-            self._report_weighted_progress(
-                30,
-                80,
-                index - 1,
-                total_sources,
-                f"Crawling source {index} of {total_sources}: {seed.name}",
-            )
             try:
-                html = self.fetch_html(seed.url)
-                extracted = self.extractor.extract(html, seed)
-                if requested_brand:
-                    extracted = [product for product in extracted if brands_match(product.brand, requested_brand)]
-                products.extend(extracted)
+                crawl_result = crawler.crawl_source(
+                    seed=seed,
+                    category=category,
+                    requested_brand=requested_brand,
+                    settings=crawl_settings,
+                    progress_callback=lambda current, total, label, index=index, total_sources=total_sources: self._report_live_source_progress(
+                        source_index=index,
+                        total_sources=total_sources,
+                        current_page=current,
+                        total_pages=total,
+                        label=label,
+                    ),
+                )
+                products.extend(crawl_result.products)
+                outcome_status = CrawlStatus.SUCCESS if crawl_result.pages_crawled else CrawlStatus.FAILED
                 outcomes.append(
                     CrawlOutcome(
                         source=seed,
-                        status=CrawlStatus.SUCCESS,
-                        extracted_count=len(extracted),
-                        capture_count=1,
+                        status=outcome_status,
+                        extracted_count=len(crawl_result.products),
+                        capture_count=crawl_result.pages_crawled,
+                        error=(
+                            "; ".join(crawl_result.errors)
+                            if crawl_result.errors
+                            else (None if crawl_result.pages_crawled else "no pages crawled")
+                        ),
                     )
                 )
+            except CrawlCancelled as exc:
+                raise MiningCancelled() from exc
             except Exception as exc:
                 outcomes.append(
                     CrawlOutcome(
@@ -315,6 +366,21 @@ class GearMinerAgent:
         progress = start + int(((end - start) * clamped_current) / total)
         self._report_progress(progress, 100, label)
 
+    def _report_live_source_progress(
+        self,
+        source_index: int,
+        total_sources: int,
+        current_page: int,
+        total_pages: int,
+        label: str,
+    ) -> None:
+        total_expected_pages = max(total_sources * self.default_live_page_limit, 1)
+        absolute_current = min(
+            ((source_index - 1) * self.default_live_page_limit) + max(current_page, 0),
+            total_expected_pages,
+        )
+        self._report_weighted_progress(30, 80, absolute_current, total_expected_pages, label)
+
 
 def brands_match(candidate_brand: str, requested_brand: str) -> bool:
     return normalize_brand_name(candidate_brand) == normalize_brand_name(requested_brand)
@@ -337,3 +403,18 @@ def merge_sources(
             break
 
     return merged
+
+
+def filter_sources_by_domains(
+    seeds: Iterable[SourceSeed],
+    allow_domains: Sequence[str] = (),
+    block_domains: Sequence[str] = (),
+) -> List[SourceSeed]:
+    if not allow_domains and not block_domains:
+        return list(seeds)
+
+    filtered = []
+    for seed in seeds:
+        if is_url_allowed(seed.url, allow_domains=allow_domains, block_domains=block_domains):
+            filtered.append(seed)
+    return filtered

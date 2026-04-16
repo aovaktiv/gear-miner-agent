@@ -24,7 +24,15 @@ class FakeLiveDiscovery:
         self.sources = list(sources)
         self.errors = list(errors or [])
 
-    def discover_sources(self, brand: str, category: GearCategory, limit: int = 20, progress_callback=None):
+    def discover_sources(
+        self,
+        brand: str,
+        category: GearCategory,
+        limit: int = 20,
+        allow_domains=(),
+        block_domains=(),
+        progress_callback=None,
+    ):
         if progress_callback:
             progress_callback(0, 3, f'Searching live web: "{brand}" "{category.display_name}"')
             progress_callback(3, 3, "Live search discovery complete")

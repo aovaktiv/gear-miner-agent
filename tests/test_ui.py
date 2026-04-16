@@ -18,7 +18,15 @@ class FakeLiveDiscovery:
     def __init__(self, sources):
         self.sources = list(sources)
 
-    def discover_sources(self, brand: str, category: GearCategory, limit: int = 20, progress_callback=None):
+    def discover_sources(
+        self,
+        brand: str,
+        category: GearCategory,
+        limit: int = 20,
+        allow_domains=(),
+        block_domains=(),
+        progress_callback=None,
+    ):
         if progress_callback:
             progress_callback(0, 3, f'Searching live web: "{brand}" "{category.display_name}"')
             progress_callback(3, 3, "Live search discovery complete")
@@ -84,10 +92,13 @@ class GearMinerUiTest(unittest.TestCase):
 
         self.assertIn("Step 1: Brand", page)
         self.assertIn("Step 2: Product category", page)
+        self.assertIn("Allow domains", page)
+        self.assertIn("Block domains", page)
+        self.assertIn("Search History", page)
         self.assertIn("Run Gear Miner", page)
         self.assertIn("live web search", page)
-        self.assertIn("Kill Last Job", page)
-        self.assertIn("Clear for New Search", page)
+        self.assertIn("Terminate Selected Search", page)
+        self.assertIn("Clear Selected Search", page)
         self.assertIn("progress-fill", page)
 
     def test_reset_latest_run_clears_completed_run(self) -> None:
@@ -173,6 +184,39 @@ class GearMinerUiTest(unittest.TestCase):
 
             release_fetch.set()
             self._wait_for_run(manager, run.run_id)
+
+    def test_manage_run_can_cancel_selected_active_run(self) -> None:
+        html = FIXTURE.read_text(encoding="utf-8")
+        release_fetch = threading.Event()
+
+        def fetch_html(_: str) -> str:
+            release_fetch.wait(timeout=1)
+            return html
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            manager = RunManager(
+                data_dir=Path(tmp_dir),
+                agent_factory=lambda: GearMinerAgent(
+                    fetch_html=fetch_html,
+                    live_discovery=FakeLiveDiscovery(fake_live_sources()),
+                ),
+                photo_store=fake_photo_store(),
+            )
+            first = manager.submit_run("Brooks", "Running shoes", "csv")
+            second = manager.submit_run("Brooks", "Running shoes", "csv")
+            self._wait_for_status(manager, first.run_id, {RunStatus.RUNNING.value})
+            self._wait_for_status(manager, second.run_id, {RunStatus.RUNNING.value, RunStatus.QUEUED.value})
+
+            result = manager.manage_run(first.run_id)
+            self.assertEqual(result["action"], "cancel_requested")
+            self.assertEqual(result["run"]["run_id"], first.run_id)
+
+            release_fetch.set()
+            cancelled = self._wait_for_status(manager, first.run_id, {RunStatus.CANCELLED.value})
+            completed = self._wait_for_status(manager, second.run_id, {RunStatus.SUCCEEDED.value, RunStatus.FAILED.value})
+
+            self.assertEqual(cancelled["error"], "Run cancelled by user.")
+            self.assertEqual(completed["status"], RunStatus.SUCCEEDED.value)
 
     def _wait_for_run(self, manager: RunManager, run_id: str) -> dict:
         return self._wait_for_status(manager, run_id, {RunStatus.SUCCEEDED.value, RunStatus.FAILED.value})
