@@ -13,7 +13,7 @@ from .ui import serve_ui
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gear-miner",
-        description="Mine gear data from the web, starting with running shoes.",
+        description="Mine live gear data from the web, starting with running shoes.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -34,7 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     mine_parser = subparsers.add_parser(
         "mine",
-        help="Run a mining pass with prompted brand/category inputs when needed.",
+        help="Run a live mining pass with prompted brand/category inputs when needed.",
     )
     mine_parser.add_argument(
         "--brand",
@@ -50,7 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--limit",
         type=int,
         default=None,
-        help="Only crawl the first N configured sources.",
+        help="Only crawl the first N discovered or configured sources.",
     )
     mine_parser.add_argument(
         "--output",
@@ -136,15 +136,23 @@ def run_mine(
     if report.requested_brand:
         print(f"Brand: {report.requested_brand}")
     print(f"Category: {report.category.display_name}")
+    print(f"Search mode: {report.search_mode}")
+    if report.live_queries_attempted:
+        print(f"Live queries attempted: {report.live_queries_attempted}")
     print(f"Attempted sources: {report.attempted_sources}")
     print(f"Successful sources: {report.succeeded_sources}")
     print(f"Failed sources: {report.failed_sources}")
     print(f"Products extracted: {len(report.products)}")
     print(f"Unique models: {report.unique_models}")
+    if report.warnings:
+        print(f"Warnings: {len(report.warnings)}")
 
     failed = [outcome for outcome in report.outcomes if outcome.error]
     for outcome in failed:
         print(f"Failed: {outcome.source.name} -> {outcome.error}")
+
+    for warning in report.warnings:
+        print(f"Warning: {warning}")
 
     if output is not None:
         print(f"Snapshot saved to: {output}")

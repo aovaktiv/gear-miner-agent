@@ -55,6 +55,10 @@ class ManagedRun:
     summary: Dict[str, Any] = field(default_factory=dict)
     outcomes: List[Dict[str, Any]] = field(default_factory=list)
     product_preview: List[Dict[str, Any]] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+    progress_current: int = 0
+    progress_total: int = 100
+    progress_label: str = "Queued"
     error: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -73,6 +77,10 @@ class ManagedRun:
             "summary": self.summary,
             "outcomes": self.outcomes,
             "product_preview": self.product_preview,
+            "warnings": self.warnings,
+            "progress_current": self.progress_current,
+            "progress_total": self.progress_total,
+            "progress_label": self.progress_label,
             "error": self.error,
         }
 
@@ -184,6 +192,9 @@ class RunManager:
             run = self._runs[run_id]
             run.status = RunStatus.RUNNING.value
             run.started_at = utc_now_iso()
+            run.progress_current = 3
+            run.progress_total = 100
+            run.progress_label = "Starting live web search"
             self._save_locked()
 
         try:
@@ -196,16 +207,34 @@ class RunManager:
             photo_dir = self.photos_dir / run.run_id
 
             agent = self.agent_factory()
-            if hasattr(agent, "should_cancel"):
-                agent.should_cancel = lambda run_id=run_id: self._cancel_events.get(run_id, threading.Event()).is_set()
+            agent.should_cancel = lambda run_id=run_id: self._cancel_events.get(run_id, threading.Event()).is_set()
+            agent.progress_callback = lambda current, total, label, run_id=run_id: self._update_progress(
+                run_id,
+                current,
+                total,
+                label,
+            )
             report = agent.mine_category(
                 category=category,
                 brand=run.brand,
                 output_path=snapshot_path,
             )
             self._raise_if_cancelled(run_id)
-            photo_result = self.photo_store.save_product_photos(report.products, photo_dir)
+            self._update_progress(run_id, 82, 100, "Saving product photos")
+            photo_result = self.photo_store.save_product_photos(
+                report.products,
+                photo_dir,
+                progress_callback=lambda current, total, label, run_id=run_id: self._update_weighted_progress(
+                    run_id,
+                    start=82,
+                    end=96,
+                    current=current,
+                    total=total,
+                    label=label,
+                ),
+            )
             self._raise_if_cancelled(run_id)
+            self._update_progress(run_id, 97, 100, f"Writing {export_format.label} export")
             write_products_export(export_path, report.products, export_format)
             self._raise_if_cancelled(run_id)
 
@@ -217,6 +246,7 @@ class RunManager:
                 run.export_path = str(export_path.resolve())
                 run.summary = payload["summary"]
                 run.outcomes = payload["outcomes"]
+                run.warnings = payload.get("warnings", []) + list(photo_result.errors)
                 run.product_preview = [
                     {
                         "name": product["name"],
@@ -232,6 +262,10 @@ class RunManager:
                 ]
                 run.summary["photos_saved"] = photo_result.saved_count
                 run.summary["photos_skipped"] = photo_result.skipped_count
+                run.summary["warning_count"] = len(run.warnings)
+                run.progress_current = 100
+                run.progress_total = 100
+                run.progress_label = "Live search complete"
                 self._save_locked()
         except (RunCancelled, MiningCancelled):
             with self._lock:
@@ -241,6 +275,7 @@ class RunManager:
                 run.status = RunStatus.CANCELLED.value
                 run.finished_at = utc_now_iso()
                 run.error = "Run cancelled by user."
+                run.progress_label = "Run cancelled"
                 self._save_locked()
         except Exception as exc:
             with self._lock:
@@ -248,6 +283,7 @@ class RunManager:
                 run.status = RunStatus.FAILED.value
                 run.finished_at = utc_now_iso()
                 run.error = str(exc)
+                run.progress_label = "Run failed"
                 self._save_locked()
 
     def _build_base_name(self, run_id: str, brand: str, category: GearCategory) -> str:
@@ -263,6 +299,33 @@ class RunManager:
         if not self._runs:
             return None
         return max(self._runs.values(), key=lambda run: run.created_at)
+
+    def _update_progress(self, run_id: str, current: int, total: int, label: str) -> None:
+        with self._lock:
+            run = self._runs.get(run_id)
+            if run is None:
+                return
+            run.progress_current = max(current, 0)
+            run.progress_total = max(total, 1)
+            run.progress_label = label
+            self._save_locked()
+
+    def _update_weighted_progress(
+        self,
+        run_id: str,
+        start: int,
+        end: int,
+        current: int,
+        total: int,
+        label: str,
+    ) -> None:
+        if total <= 0:
+            self._update_progress(run_id, end, 100, label)
+            return
+
+        bounded_current = min(max(current, 0), total)
+        progress = start + int(((end - start) * bounded_current) / total)
+        self._update_progress(run_id, progress, 100, label)
 
     def _delete_run_artifacts(self, run: ManagedRun) -> None:
         for raw_path in (run.snapshot_path, run.export_path):
@@ -301,6 +364,10 @@ class RunManager:
                 summary=item.get("summary", {}),
                 outcomes=item.get("outcomes", []),
                 product_preview=item.get("product_preview", []),
+                warnings=item.get("warnings", []),
+                progress_current=item.get("progress_current", 0),
+                progress_total=item.get("progress_total", 100),
+                progress_label=item.get("progress_label", "Queued"),
                 error=item.get("error"),
             )
             runs[run.run_id] = run
@@ -755,6 +822,34 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
         margin-top: 14px;
       }}
 
+      .progress-block {{
+        margin-top: 14px;
+      }}
+
+      .progress-track {{
+        width: 100%;
+        height: 12px;
+        border-radius: 999px;
+        overflow: hidden;
+        background: rgba(20, 33, 61, 0.08);
+      }}
+
+      .progress-fill {{
+        height: 100%;
+        border-radius: 999px;
+        background: linear-gradient(135deg, var(--accent), var(--accent-2));
+        transition: width 180ms ease;
+      }}
+
+      .progress-meta {{
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        margin-top: 8px;
+        color: rgba(20, 33, 61, 0.72);
+        font-size: 0.92rem;
+      }}
+
       .summary-item {{
         padding: 12px;
         border-radius: 16px;
@@ -860,14 +955,14 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
       <section class="hero">
         <div class="eyebrow">Control Room</div>
         <h1>Gear Miner Agent UI</h1>
-        <p>Enter a brand and product category, run a historical search from 2020 to present, and download the results as CSV or Excel with product photos saved as JPG or PNG when available.</p>
+        <p>Enter a brand and product category, run a live web search across the open web, and download the results as CSV or Excel with product photos saved as JPG or PNG when available.</p>
       </section>
 
       <section class="layout">
         <aside class="panel form-panel">
           <div class="eyebrow">Launch</div>
           <h2>Start a Mining Run</h2>
-          <p class="subcopy">The first two prompts are the key inputs: brand and product category. The agent searches archived and current source pages from 2020 to present, and the export file contains Brand, Product Name, and a saved JPG or PNG product photo file path.</p>
+          <p class="subcopy">The first two prompts are the key inputs: brand and product category. The agent runs a live search, crawls the current web for matching products, and exports Brand, Product Name, and a saved JPG or PNG product photo file path.</p>
           <form id="runForm">
             <div class="field">
               <label for="brand">Step 1: Brand</label>
@@ -878,7 +973,7 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
             <div class="field">
               <label for="category">Step 2: Product category</label>
               <input id="category" name="category" type="text" placeholder="Running shoes" value="Running shoes" required />
-              <small>Human-friendly category text is supported. Historical search window: 2020 to present.</small>
+              <small>Human-friendly category text is supported. The live search tries current web results first, then falls back to configured sources if needed.</small>
             </div>
 
             <div class="field">
@@ -907,7 +1002,7 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
               <div class="eyebrow">Manage</div>
               <h2>Recent Runs</h2>
             </div>
-            <p class="subcopy">Completed historical exports and saved product photos stay here so you can download them again later.</p>
+            <p class="subcopy">Completed live-search exports and saved product photos stay here so you can download them again later.</p>
           </div>
           <div id="runsRoot" class="runs-grid"></div>
         </section>
@@ -970,7 +1065,7 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
       function renderRuns(runs) {{
         if (!runs.length) {{
           syncResetButton(runs);
-          runsRoot.innerHTML = '<div class="empty">No mining runs yet. Start with a brand and product category to create your first historical export.</div>';
+          runsRoot.innerHTML = '<div class="empty">No mining runs yet. Start with a brand and product category to create your first live-search export.</div>';
           return;
         }}
 
@@ -979,7 +1074,11 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
           const summary = run.summary || {{}};
           const preview = Array.isArray(run.product_preview) ? run.product_preview : [];
           const outcomes = Array.isArray(run.outcomes) ? run.outcomes : [];
+          const warnings = Array.isArray(run.warnings) ? run.warnings : [];
           const actions = [];
+          const progressTotal = Math.max(Number(run.progress_total || 100), 1);
+          const progressCurrent = Math.min(Math.max(Number(run.progress_current || 0), 0), progressTotal);
+          const progressPercent = Math.round((progressCurrent / progressTotal) * 100);
 
           if (run.export_path) {{
             const outputLabel = run.export_format === "excel" ? "Download Excel" : "Download CSV";
@@ -1002,6 +1101,7 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
             return `<li><div class="preview-row">${{photo}}<div><strong>${{escapeHtml(product.brand)}}</strong> • ${{escapeHtml(product.name)}}${{photoNote}} ${{url}}</div></div></li>`;
           }}).join("");
 
+          const warningItems = warnings.map((warning) => `<li>${{escapeHtml(warning)}}</li>`).join("");
           const errorBlock = run.error ? `<p style="color: var(--danger); margin: 12px 0 0;">${{escapeHtml(run.error)}}</p>` : "";
 
           return `
@@ -1009,9 +1109,18 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
               <div class="run-top">
                 <div>
                   <h3 class="run-title">${{escapeHtml(run.brand)}} · ${{escapeHtml(run.category_input)}}</h3>
-                  <div class="run-meta">Created ${{escapeHtml(formatTimestamp(run.created_at))}} · Historical window 2020-present · Output ${{escapeHtml(run.export_format.toUpperCase())}}</div>
+                  <div class="run-meta">Created ${{escapeHtml(formatTimestamp(run.created_at))}} · Live web search · Output ${{escapeHtml(run.export_format.toUpperCase())}}</div>
                 </div>
                 <span class="badge ${{escapeHtml(run.status)}}">${{escapeHtml(run.status)}}</span>
+              </div>
+              <div class="progress-block">
+                <div class="progress-track">
+                  <div class="progress-fill" style="width: ${{progressPercent}}%;"></div>
+                </div>
+                <div class="progress-meta">
+                  <span>${{escapeHtml(run.progress_label || "Queued")}}</span>
+                  <span>${{progressPercent}}%</span>
+                </div>
               </div>
               <div class="summary-grid">
                 <div class="summary-item">
@@ -1038,6 +1147,10 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
               ${{errorBlock}}
               <div class="actions">${{actions.join("")}}</div>
               <details>
+                <summary>Warnings</summary>
+                <ul>${{warningItems || "<li>No warnings recorded.</li>"}}</ul>
+              </details>
+              <details>
                 <summary>Source outcomes</summary>
                 <ul>${{outcomeItems || "<li>No source results yet.</li>"}}</ul>
               </details>
@@ -1059,7 +1172,7 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
       runForm.addEventListener("submit", async (event) => {{
         event.preventDefault();
         runButton.disabled = true;
-        statusMessage.textContent = "Launching the historical mining run...";
+        statusMessage.textContent = "Launching the live web mining run...";
 
         const formData = new FormData(runForm);
         const body = new URLSearchParams();
@@ -1077,7 +1190,7 @@ def render_dashboard_page(runs: List[Dict[str, Any]]) -> str:
           if (!response.ok) {{
             throw new Error(payload.error || "Unable to start the mining run.");
           }}
-          statusMessage.textContent = "Run started. The results card will update when the 2020-present historical search finishes.";
+          statusMessage.textContent = "Run started. The progress bar will update as live search, crawling, photos, and export steps complete.";
           await refreshRuns();
         }} catch (error) {{
           statusMessage.textContent = error.message;

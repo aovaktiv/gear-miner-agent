@@ -50,6 +50,34 @@ class ProductPhotoStoreTest(unittest.TestCase):
             self.assertEqual(result.skipped_count, 1)
             self.assertIsNone(product.photo_path)
 
+    def test_handles_photo_download_failure_without_failing_run(self) -> None:
+        product = ProductCandidate(
+            source_name="Nike Running",
+            source_kind=SourceKind.BRAND,
+            source_url="https://example.com/source",
+            product_url="https://example.com/product",
+            category=GearCategory.RUNNING_SHOE,
+            name="Nike Pegasus 41",
+            brand="Nike",
+            model="Pegasus 41",
+            photo_url="https://example.com/images/nike-pegasus-41.jpg",
+            photo_format="jpg",
+        )
+
+        def fetch_photo(_: str) -> tuple[bytes, str]:
+            raise RuntimeError("download timed out")
+
+        store = ProductPhotoStore(fetch_photo=fetch_photo)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            result = store.save_product_photos([product], Path(tmp_dir))
+
+            self.assertEqual(result.saved_count, 0)
+            self.assertEqual(result.skipped_count, 1)
+            self.assertEqual(len(result.errors), 1)
+            self.assertIn("download timed out", result.errors[0])
+            self.assertIsNone(product.photo_path)
+
 
 if __name__ == "__main__":
     unittest.main()
