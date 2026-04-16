@@ -217,8 +217,11 @@ class MineReport:
     products: List[ProductCandidate]
     outcomes: List[CrawlOutcome]
     requested_brand: Optional[str] = None
+    search_mode: str = "historical"
+    live_queries_attempted: int = 0
     search_start_year: int = 2020
     search_end_year: int = field(default_factory=lambda: datetime.utcnow().year)
+    warnings: List[str] = field(default_factory=list)
 
     @property
     def attempted_sources(self) -> int:
@@ -240,8 +243,11 @@ class MineReport:
         return {
             "category": self.category.value,
             "requested_brand": self.requested_brand,
+            "search_mode": self.search_mode,
+            "live_queries_attempted": self.live_queries_attempted,
             "search_start_year": self.search_start_year,
             "search_end_year": self.search_end_year,
+            "warnings": list(self.warnings),
             "started_at": self.started_at.isoformat(),
             "finished_at": self.finished_at.isoformat(),
             "summary": {
@@ -250,6 +256,7 @@ class MineReport:
                 "failed_sources": self.failed_sources,
                 "products": len(self.products),
                 "unique_models": self.unique_models,
+                "warning_count": len(self.warnings),
             },
             "outcomes": [outcome.to_dict() for outcome in self.outcomes],
             "products": [product.to_dict() for product in self.products],

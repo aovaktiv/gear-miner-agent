@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from typing import Callable, Iterable, List, Optional
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
@@ -16,6 +16,7 @@ PHOTO_HEADERS = {
 
 
 FetchPhoto = Callable[[str], tuple[bytes, Optional[str]]]
+PhotoProgressCallback = Callable[[int, int, str], None]
 
 
 def default_fetch_photo(url: str, timeout_seconds: int = 20) -> tuple[bytes, Optional[str]]:
@@ -29,6 +30,11 @@ def default_fetch_photo(url: str, timeout_seconds: int = 20) -> tuple[bytes, Opt
 class PhotoDownloadResult:
     saved_count: int = 0
     skipped_count: int = 0
+    errors: List[str] = None
+
+    def __post_init__(self) -> None:
+        if self.errors is None:
+            self.errors = []
 
 
 class ProductPhotoStore:
@@ -39,18 +45,31 @@ class ProductPhotoStore:
         self,
         products: Iterable[ProductCandidate],
         output_dir: Path,
+        progress_callback: Optional[PhotoProgressCallback] = None,
     ) -> PhotoDownloadResult:
         output_dir.mkdir(parents=True, exist_ok=True)
         result = PhotoDownloadResult()
+        items = list(products)
+        total = len(items)
 
-        for index, product in enumerate(products, start=1):
+        if total == 0 and progress_callback:
+            progress_callback(1, 1, "No product photos to save")
+
+        for index, product in enumerate(items, start=1):
             photo_url = product.photo_url
             photo_format = infer_photo_format(photo_url) or product.photo_format
+            if progress_callback:
+                progress_callback(index - 1, max(total, 1), f"Saving product photo {index} of {total}")
             if not photo_url or photo_format not in {"jpg", "png"}:
                 result.skipped_count += 1
                 continue
 
-            payload, content_type = self.fetch_photo(photo_url)
+            try:
+                payload, content_type = self.fetch_photo(photo_url)
+            except Exception as exc:
+                result.skipped_count += 1
+                result.errors.append(f"{photo_url}: {exc}")
+                continue
             resolved_format = normalize_photo_format(photo_format, content_type)
             if resolved_format not in {"jpg", "png"}:
                 result.skipped_count += 1
@@ -63,6 +82,9 @@ class ProductPhotoStore:
             product.photo_format = resolved_format
             product.photo_path = str(photo_path)
             result.saved_count += 1
+
+        if progress_callback:
+            progress_callback(max(total, 1), max(total, 1), "Product photo saving complete")
 
         return result
 

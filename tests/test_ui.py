@@ -4,7 +4,8 @@ import threading
 import time
 import unittest
 
-from gear_miner.models import HistoricalCapture
+from gear_miner.live_search import DiscoveryReport
+from gear_miner.models import GearCategory, SourceKind, SourceSeed
 from gear_miner.photos import ProductPhotoStore
 from gear_miner.pipeline import GearMinerAgent
 from gear_miner.ui import RunManager, RunStatus, render_dashboard_page
@@ -13,24 +14,43 @@ from gear_miner.ui import RunManager, RunStatus, render_dashboard_page
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "running_vendor_page.html"
 
 
-class FakeCaptureIndex:
-    def list_captures(self, seed, start_year: int, end_year: int):
-        return [
-            HistoricalCapture(
-                timestamp="20201201000000",
-                original_url=seed.url,
-                archived_url=seed.url,
-            ),
-            HistoricalCapture(
-                timestamp="20231201000000",
-                original_url=seed.url,
-                archived_url=seed.url,
-            ),
-        ]
+class FakeLiveDiscovery:
+    def __init__(self, sources):
+        self.sources = list(sources)
+
+    def discover_sources(self, brand: str, category: GearCategory, limit: int = 20, progress_callback=None):
+        if progress_callback:
+            progress_callback(0, 3, f'Searching live web: "{brand}" "{category.display_name}"')
+            progress_callback(3, 3, "Live search discovery complete")
+        return DiscoveryReport(
+            sources=self.sources[:limit],
+            errors=[],
+            queries_attempted=3,
+        )
 
 
 def fake_photo_store() -> ProductPhotoStore:
     return ProductPhotoStore(fetch_photo=lambda _: (b"png-bytes", "image/png"))
+
+
+def fake_live_sources() -> list[SourceSeed]:
+    return [
+        SourceSeed(
+            name="Live Brooks Result",
+            url="https://example.com/live-brooks",
+            kind=SourceKind.BRAND,
+            category=GearCategory.RUNNING_SHOE,
+            brand="Brooks",
+            tags=("live-search",),
+        ),
+        SourceSeed(
+            name="Live Retailer Result",
+            url="https://example.com/live-retailer",
+            kind=SourceKind.RETAILER,
+            category=GearCategory.RUNNING_SHOE,
+            tags=("live-search",),
+        ),
+    ]
 
 
 class GearMinerUiTest(unittest.TestCase):
@@ -45,7 +65,7 @@ class GearMinerUiTest(unittest.TestCase):
                 data_dir=Path(tmp_dir),
                 agent_factory=lambda: GearMinerAgent(
                     fetch_html=fetch_html,
-                    capture_index=FakeCaptureIndex(),
+                    live_discovery=FakeLiveDiscovery(fake_live_sources()),
                 ),
                 photo_store=fake_photo_store(),
             )
@@ -65,9 +85,10 @@ class GearMinerUiTest(unittest.TestCase):
         self.assertIn("Step 1: Brand", page)
         self.assertIn("Step 2: Product category", page)
         self.assertIn("Run Gear Miner", page)
-        self.assertIn("2020 to present", page)
+        self.assertIn("live web search", page)
         self.assertIn("Kill Last Job", page)
         self.assertIn("Clear for New Search", page)
+        self.assertIn("progress-fill", page)
 
     def test_reset_latest_run_clears_completed_run(self) -> None:
         html = FIXTURE.read_text(encoding="utf-8")
@@ -80,7 +101,7 @@ class GearMinerUiTest(unittest.TestCase):
                 data_dir=Path(tmp_dir),
                 agent_factory=lambda: GearMinerAgent(
                     fetch_html=fetch_html,
-                    capture_index=FakeCaptureIndex(),
+                    live_discovery=FakeLiveDiscovery(fake_live_sources()),
                 ),
                 photo_store=fake_photo_store(),
             )
@@ -112,7 +133,7 @@ class GearMinerUiTest(unittest.TestCase):
                 data_dir=Path(tmp_dir),
                 agent_factory=lambda: GearMinerAgent(
                     fetch_html=fetch_html,
-                    capture_index=FakeCaptureIndex(),
+                    live_discovery=FakeLiveDiscovery(fake_live_sources()),
                 ),
                 photo_store=fake_photo_store(),
             )
@@ -125,6 +146,33 @@ class GearMinerUiTest(unittest.TestCase):
             release_fetch.set()
             final_run = self._wait_for_status(manager, run.run_id, {RunStatus.CANCELLED.value})
             self.assertEqual(final_run["error"], "Run cancelled by user.")
+
+    def test_active_run_exposes_progress_updates(self) -> None:
+        html = FIXTURE.read_text(encoding="utf-8")
+        release_fetch = threading.Event()
+
+        def fetch_html(_: str) -> str:
+            release_fetch.wait(timeout=1)
+            return html
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            manager = RunManager(
+                data_dir=Path(tmp_dir),
+                agent_factory=lambda: GearMinerAgent(
+                    fetch_html=fetch_html,
+                    live_discovery=FakeLiveDiscovery(fake_live_sources()),
+                ),
+                photo_store=fake_photo_store(),
+            )
+            run = manager.submit_run("Brooks", "Running shoes", "csv")
+            running = self._wait_for_status(manager, run.run_id, {RunStatus.RUNNING.value})
+
+            self.assertGreater(running["progress_current"], 0)
+            self.assertEqual(running["progress_total"], 100)
+            self.assertTrue(running["progress_label"])
+
+            release_fetch.set()
+            self._wait_for_run(manager, run.run_id)
 
     def _wait_for_run(self, manager: RunManager, run_id: str) -> dict:
         return self._wait_for_status(manager, run_id, {RunStatus.SUCCEEDED.value, RunStatus.FAILED.value})

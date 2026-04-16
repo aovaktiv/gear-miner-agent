@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 
+from gear_miner.live_search import DiscoveryReport
 from gear_miner.models import GearCategory, HistoricalCapture, SourceKind, SourceSeed
 from gear_miner.pipeline import GearMinerAgent
 
@@ -16,6 +17,22 @@ class FakeCaptureIndex:
 
     def list_captures(self, seed: SourceSeed, start_year: int, end_year: int):
         return list(self.captures_by_url.get(seed.url, []))
+
+
+class FakeLiveDiscovery:
+    def __init__(self, sources, errors=None):
+        self.sources = list(sources)
+        self.errors = list(errors or [])
+
+    def discover_sources(self, brand: str, category: GearCategory, limit: int = 20, progress_callback=None):
+        if progress_callback:
+            progress_callback(0, 3, f'Searching live web: "{brand}" "{category.display_name}"')
+            progress_callback(3, 3, "Live search discovery complete")
+        return DiscoveryReport(
+            sources=self.sources[:limit],
+            errors=self.errors,
+            queries_attempted=3,
+        )
 
 
 class GearMinerAgentTest(unittest.TestCase):
@@ -137,6 +154,43 @@ class GearMinerAgentTest(unittest.TestCase):
         self.assertEqual(report.products[0].brand, "Brooks")
         self.assertEqual(report.outcomes[0].capture_count, 2)
         self.assertEqual(report.outcomes[0].extracted_count, 2)
+
+    def test_mine_category_uses_live_discovery_with_fallback_warnings(self) -> None:
+        html = FIXTURE.read_text(encoding="utf-8")
+
+        def fetch_html(_: str) -> str:
+            return html
+
+        live_sources = [
+            SourceSeed(
+                name="Live Brooks Result",
+                url="https://example.com/live-brooks",
+                kind=SourceKind.BRAND,
+                category=GearCategory.RUNNING_SHOE,
+                brand="Brooks",
+                tags=("live-search",),
+            ),
+        ]
+
+        agent = GearMinerAgent(
+            fetch_html=fetch_html,
+            live_discovery=FakeLiveDiscovery(live_sources, errors=["Search query failed for 'buy': timeout"]),
+        )
+
+        report = agent.mine_category(
+            category=GearCategory.RUNNING_SHOE,
+            brand="Brooks",
+            limit=1,
+        )
+
+        self.assertEqual(report.search_mode, "live")
+        self.assertEqual(report.live_queries_attempted, 3)
+        self.assertEqual(report.attempted_sources, 1)
+        self.assertEqual(report.succeeded_sources, 1)
+        self.assertGreaterEqual(len(report.products), 1)
+        self.assertEqual(report.products[0].brand, "Brooks")
+        self.assertEqual(len(report.warnings), 1)
+        self.assertIn("timeout", report.warnings[0])
 
 
 if __name__ == "__main__":
